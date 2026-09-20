@@ -1,290 +1,356 @@
-import requests
+"""Cliente seguro de la API de CryptoNotes."""
+
+from __future__ import annotations
+
+import ipaddress
 import json
 import os
 import uuid
-from typing import Dict, Any, Optional, cast
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, cast
 
-# Módulos de criptografía
+import requests
 from cryptography import x509
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.exceptions import InvalidTag, InvalidSignature
+from cryptography.x509.oid import ExtendedKeyUsageOID
 
-ROOT_PATH = "root_ca.crt"
+from core.crypto_utils import (
+    GCM_NONCE_BYTES,
+    SecurityError,
+    canonical_json,
+    create_vault,
+    decode_hex,
+    decrypt_note,
+    encrypt_note,
+    envelope_signing_bytes,
+    transport_aad,
+    unwrap_vault_key,
+)
+
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+ROOT_CERT_PATH = PROJECT_DIR / "certificados" / "root_ca.crt"
+
 
 class ManejadorDatos:
-    def __init__(self):
-        self.servidor_url = "http://localhost:5000"
+    """Mantiene la sesión, verifica al servidor y cifra las notas localmente."""
+
+    def __init__(self, server_url: str = "http://127.0.0.1:5000"):
+        self.server_url = server_url.rstrip("/")
+        self.http = requests.Session()
+        self.session_key: bytes | None = None
+        self.server_certificate: x509.Certificate | None = None
+        self.server_public_key: RSAPublicKey | None = None
+        self.client_id = ""
+        self.client_sequence = 0
+        self.server_sequence = 0
+        self.username: str | None = None
+        self.vault_key: bytes | None = None
+        self.last_error = ""
+
+    def _clear_transport(self) -> None:
         self.session_key = None
-        
-        self.servidor_cert = None     
-        self.servidor_pub_key = None  
-        self.id_cliente = str(uuid.uuid4())
+        self.server_certificate = None
+        self.server_public_key = None
+        self.client_sequence = 0
+        self.server_sequence = 0
+        self.client_id = ""
 
-        print(f"[Cliente] Iniciando cliente con ID: {self.id_cliente[:8]}...")
-        self._obtener_y_verificar_certificados()
-        self._establecer_conexion_segura()
+    def _clear_identity(self) -> None:
+        self.username = None
+        self.vault_key = None
 
-# ======== GESTION DE CERTIFICADOS =========
-    def _obtener_y_verificar_certificados(self):
+    @staticmethod
+    def _check_certificate_dates(certificate: x509.Certificate) -> None:
+        now = datetime.now(timezone.utc)
+        if not certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc:
+            raise SecurityError("Hay un certificado caducado o todavía no válido")
+
+    def _obtain_and_verify_certificates(self) -> None:
+        if not ROOT_CERT_PATH.exists():
+            raise SecurityError(
+                "No existe el certificado raíz local; ejecuta generar_pki.py"
+            )
+        response = self.http.get(f"{self.server_url}/get-certs", timeout=4)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise SecurityError("Respuesta de certificados inválida")
+
+        root = x509.load_pem_x509_certificate(ROOT_CERT_PATH.read_bytes())
+        intermediate_pem = data.get("intermediate_ca")
+        server_pem = data.get("server_cert")
+        if not isinstance(intermediate_pem, str) or not isinstance(server_pem, str):
+            raise SecurityError("Cadena de certificados incompleta")
+        intermediate = x509.load_pem_x509_certificate(intermediate_pem.encode("ascii"))
+        server = x509.load_pem_x509_certificate(server_pem.encode("ascii"))
+
+        for certificate in (root, intermediate, server):
+            self._check_certificate_dates(certificate)
+        root.verify_directly_issued_by(root)
+        intermediate.verify_directly_issued_by(root)
+        server.verify_directly_issued_by(intermediate)
+
+        root_constraints = root.extensions.get_extension_for_class(
+            x509.BasicConstraints
+        ).value
+        intermediate_constraints = intermediate.extensions.get_extension_for_class(
+            x509.BasicConstraints
+        ).value
+        server_constraints = server.extensions.get_extension_for_class(
+            x509.BasicConstraints
+        ).value
+        if not root_constraints.ca or not intermediate_constraints.ca or server_constraints.ca:
+            raise SecurityError("Restricciones de la cadena PKI inválidas")
+        usages = server.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        if ExtendedKeyUsageOID.SERVER_AUTH not in usages:
+            raise SecurityError("El certificado no es válido para autenticar servidores")
+        san = server.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        dns_names = san.get_values_for_type(x509.DNSName)
+        ip_addresses = san.get_values_for_type(x509.IPAddress)
+        if "localhost" not in dns_names or ipaddress.ip_address("127.0.0.1") not in ip_addresses:
+            raise SecurityError("El certificado no identifica al servidor local")
+
+        public_key = server.public_key()
+        if not isinstance(public_key, rsa.RSAPublicKey) or public_key.key_size < 3072:
+            raise SecurityError("La clave pública RSA del servidor es insuficiente")
+        self.server_certificate = server
+        self.server_public_key = public_key
+
+    def _establish_secure_connection(self) -> None:
+        self._clear_transport()
+        self._obtain_and_verify_certificates()
+        assert self.server_public_key is not None
+
+        self.client_id = str(uuid.uuid4())
+        self.session_key = AESGCM.generate_key(bit_length=256)
+        challenge = os.urandom(32)
+        encrypted_key = self.server_public_key.encrypt(
+            self.session_key,
+            padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+        response = self.http.post(
+            f"{self.server_url}/connect",
+            json={
+                "id_cliente": self.client_id,
+                "encrypted_session_key": encrypted_key.hex(),
+                "challenge": challenge.hex(),
+            },
+            timeout=5,
+        )
+        response.raise_for_status()
+        confirmation = self._decrypt_response(response.json(), "/connect")
+        if confirmation.get("status") != "ok" or confirmation.get("challenge") != challenge.hex():
+            raise SecurityError("El servidor no confirmó el desafío del handshake")
+
+    def _ensure_connection(self) -> bool:
+        if self.session_key is not None:
+            return True
         try:
-            response = requests.get(f"{self.servidor_url}/get_certs", timeout=3)
-            response.raise_for_status()
-            
-            data = response.json()
-            if data is None: 
-                raise ValueError("Respuesta vacía")
-            
-            with open("root_ca.crt", "rb") as f:
-                root_ca = x509.load_pem_x509_certificate(f.read(), default_backend())
-            print("[Cliente] CA Raíz de confianza cargada localmente.")
-            
-            #Cargamos los certificados que nos ha pasado el servidor
-            intermediate_pem = data.get("intermediate_ca")
-            server_pem = data.get("server_cert")
-            if not isinstance(server_pem, str) or not isinstance(intermediate_pem, str):
-                raise ValueError("Cadena de certificados inválida.")
-            self.servidor_cert = x509.load_pem_x509_certificate(server_pem.encode("utf-8"), default_backend())
-            intermediate_cert = x509.load_pem_x509_certificate(intermediate_pem.encode("utf-8"), default_backend())
-            
-            print(f"[Cliente] Certificados recibidos del servidor.")
-            
-            # VERIFICACIÓN PKI (de toda la cadena)
-            print("[Cliente] Iniciando verificación estricta de la cadena...")
-            try:
-                self.servidor_cert.verify_directly_issued_by(intermediate_cert)
-                print("   [PKI] Servidor verificado por Intermedia.")
-                intermediate_cert.verify_directly_issued_by(root_ca)
-                print("   [PKI] Intermedia verificada por Raíz.")
-                #La raiz no hay que verificarla ya que tenemos acceso a ella
-                print("[Cliente] ¡Cadena de confianza COMPLETA y VÁLIDA!")
-                self.servidor_pub_key = self.servidor_cert.public_key()
-            except InvalidSignature:
-                print("[Cliente] PELIGRO: La firma criptográfica de los certificados es INVÁLIDA.")
-                self.servidor_pub_key = None
-            except Exception as e:
-                print(f"[Cliente] Error validando cadena: {e}")
-                self.servidor_pub_key = None
-        except Exception as e:
-            print(f"[Cliente] Error obteniendo certificados: {e}")
-
-# ======== HANDSHAKE =========
-    def _establecer_conexion_segura(self):
-        if not self.servidor_pub_key:
-            print("[Cliente] No hay clave pública verificada. Abortando conexión.")
+            self._establish_secure_connection()
+            self.last_error = ""
+            return True
+        except Exception as exc:
+            self._clear_transport()
+            self.last_error = f"No se pudo establecer la conexión segura: {exc}"
             return False
+
+    def _encrypt_request(self, endpoint: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self.session_key is None:
+            raise SecurityError("No existe una clave de sesión")
+        self.client_sequence += 1
+        aad = transport_aad(
+            "client", self.client_id, endpoint, self.client_sequence
+        )
+        nonce = os.urandom(GCM_NONCE_BYTES)
+        ciphertext = AESGCM(self.session_key).encrypt(
+            nonce, canonical_json(payload), aad
+        )
+        return {
+            "id_cliente": self.client_id,
+            "sequence": self.client_sequence,
+            "nonce": nonce.hex(),
+            "ciphertext": ciphertext.hex(),
+        }
+
+    def _decrypt_response(
+        self, response_json: Mapping[str, Any], endpoint: str
+    ) -> dict[str, Any]:
+        if self.session_key is None or self.server_public_key is None:
+            raise SecurityError("No existe una sesión verificada")
+        sequence = response_json.get("sequence")
+        if not isinstance(sequence, int) or sequence != self.server_sequence + 1:
+            raise SecurityError("Respuesta repetida o fuera de secuencia")
+        nonce = decode_hex(response_json.get("nonce"), "nonce", GCM_NONCE_BYTES)
+        ciphertext = decode_hex(response_json.get("ciphertext"), "ciphertext")
+        signature = decode_hex(response_json.get("signature"), "signature")
+        aad = transport_aad("server", self.client_id, endpoint, sequence)
         try:
-            print("\n[Cliente] --- HANDSHAKE ---")
-            print("[Cliente] Generando clave de sesión (AES-256)...")
-            self.session_key = AESGCM.generate_key(bit_length=256)
-            rsa_key = cast(RSAPublicKey, self.servidor_pub_key)
-            print(f"[Cliente] Cifrando clave de sesión para el servidor...")
-            relleno = padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(), 
-                label=None)
-            
-            #Encriptamos la clave simetrica con la clave privada
-            encrypted_key = rsa_key.encrypt(self.session_key, relleno)
-            mensaje = {"id_cliente": self.id_cliente, "encrypted_session_key": encrypted_key.hex()}
-            #Pasamos los datos al servidor
-            response = requests.post(f"{self.servidor_url}/connect", json=mensaje, timeout=5)
-            
-            if response.status_code == 200:
-                resp_json = response.json()
-                print("[Cliente] Respuesta de handshake recibida. Descifrando...")
-                #Desciframos con la clave simetrica
-                confirmacion = self._decrypt_response(resp_json)
-                if confirmacion.get("status") == "ok":
-                    print("[Cliente] Conexión segura establecida y confirmada bidireccionalmente.")
-                    return True
-            
-            raise Exception("Servidor rechazó el handshake o la respuesta fue inválida")
-
-        except Exception as e:
-            print(f"[Cliente] ERROR handshake: {e}")
-            self.session_key = None
-            return False
-
-# ======== HELPERS DE CLAVE SIMÉTRICA (+ FIRMA) =========
-    def _encrypt_mensaje(self, data_dict: Dict[str, Any]) -> Dict[str, str]:
-        if not self.session_key:
-            raise ValueError("No hay clave de sesión")
-        print(f"[Cifrado Simétrico] Algoritmo: AES-GCM | Clave: {len(self.session_key)*8} bits | Modo: Autenticado")
-        aesgcm = AESGCM(self.session_key)
-        nonce = os.urandom(12)
-        data_json = json.dumps(data_dict).encode("utf-8")
-        encrypted_data = aesgcm.encrypt(nonce, data_json, None)
-
-        return {"nonce": nonce.hex(), "encrypted_data": encrypted_data.hex()}
-
-    def _decrypt_response(self, response_json: Dict[str, Any]) -> Any:
-        #Ahora tambien comprueba la firma
-        if not self.session_key:
-            raise ValueError("No hay clave de sesión")
-
+            self.server_public_key.verify(
+                signature,
+                envelope_signing_bytes(aad, nonce, ciphertext),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+        except InvalidSignature as exc:
+            raise SecurityError("Firma digital del servidor inválida") from exc
         try:
-            nonce_hex = response_json.get("nonce")
-            enc_data_hex = response_json.get("encrypted_data")
-            firma_hex = response_json.get("signature")
-        
-            if not isinstance(nonce_hex, str) or not isinstance(enc_data_hex, str) or not isinstance(firma_hex,str):
-                 raise ValueError("Formato de respuesta inválido")
-            #Hex->bytes
-            nonce = bytes.fromhex(nonce_hex)
-            encrypted_data = bytes.fromhex(enc_data_hex)
-            firma_bytes = bytes.fromhex(firma_hex)
-            #Pasamos de objeto de Openssl a objeto de cryptography
-            rsa_key = cast(RSAPublicKey, self.servidor_pub_key)
-            
-            # VERIFICACIÓN DE FIRMA DIGITAL (Encrypt-then-Sign)                
-            # Concatenamos Nonce + Datos Cifrados para asegurar la integridad de todo el bloque
-            bytes_to_verify = nonce + encrypted_data
-            
-            try:
-                # verify calcula internamente el hash (SHA256) de bytes_to_verify y lo compara con la firma
-                rsa_key.verify(
-                    firma_bytes,
-                    bytes_to_verify,
-                    padding.PSS(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        salt_length=padding.PSS.MAX_LENGTH),
-                    hashes.SHA256()
-                )
-                print("   [Firma Digital] ¡VERIFICADA! Integridad y Autenticidad confirmadas.")
-            except InvalidSignature:
-                print("   [Firma Digital] ¡ERROR! Firma inválida. El paquete ha sido alterado o no proviene del servidor.")
-                raise ValueError("Firma digital inválida - Abortando descifrado")
-            
-            # DESCIFRADO SIMÉTRICO (Solo si la firma pasó)
-            aesgcm = AESGCM(self.session_key)
-            decrypted_bytes = aesgcm.decrypt(nonce, encrypted_data, None)
-            #bytes-> dict
-            contenido = json.loads(decrypted_bytes.decode("utf-8"))
-            return contenido
+            plaintext = AESGCM(self.session_key).decrypt(nonce, ciphertext, aad)
+            payload = json.loads(plaintext.decode("utf-8"))
+        except Exception as exc:
+            raise SecurityError("Respuesta cifrada inválida") from exc
+        if not isinstance(payload, dict):
+            raise SecurityError("Payload de respuesta inválido")
+        self.server_sequence = sequence
+        return payload
 
-        except Exception as e:
-            print(f"   [Error Criptográfico] {e}")
-            raise ValueError(f"Fallo al descifrar/verificar: {e}")
-
-# ======== USO DE LA API =========
-    def validar_login(self, datos_login: Dict[str, Any]):
-        if not self.session_key: return None
-        usuario = datos_login.get('usuario', 'Desconocido')
-        print(f"\n[Cliente] Iniciando proceso de LOGIN para usuario: '{usuario}'")
-        
+    def _secure_post(
+        self, endpoint: str, payload: Mapping[str, Any]
+    ) -> tuple[dict[str, Any] | None, int]:
+        if not self._ensure_connection():
+            return None, 0
         try:
-            mensaje = {"id_cliente": self.id_cliente}
-            mensaje.update(self._encrypt_mensaje(datos_login))
-            response = requests.post(f"{self.servidor_url}/login", json=mensaje, timeout=2)
-            
-            if response.status_code != 200:
-                # Intento leer el mensaje de error del servidor si viene en JSON plano
-                try:
-                    error_msg = response.json().get("message", "Error desconocido")
-                except:
-                    error_msg = f"Status {response.status_code}"
-                print(f"[Cliente] Login RECHAZADO por el servidor: {error_msg}")
+            envelope = self._encrypt_request(endpoint, payload)
+            response = self.http.post(
+                f"{self.server_url}{endpoint}", json=envelope, timeout=5
+            )
+            body = response.json()
+            if not isinstance(body, dict):
+                raise SecurityError("Respuesta del servidor inválida")
+            if {"sequence", "nonce", "ciphertext", "signature"} <= body.keys():
+                decoded = self._decrypt_response(body, endpoint)
+                if decoded.get("status") == "error":
+                    self.last_error = str(decoded.get("message", "Operación rechazada"))
+                else:
+                    self.last_error = ""
+                return decoded, response.status_code
+            self.last_error = str(body.get("message", "Petición rechazada"))
+            # Tras un error de protocolo no es seguro adivinar qué contador vio
+            # el servidor; la siguiente operación negociará otra sesión.
+            self._clear_transport()
+            self._clear_identity()
+            return None, response.status_code
+        except Exception as exc:
+            self.last_error = f"Fallo de seguridad o conexión: {exc}"
+            self._clear_transport()
+            self._clear_identity()
+            return None, 0
+
+    def _decrypt_note_records(self, records: Any) -> list[dict[str, str]]:
+        if self.vault_key is None or self.username is None:
+            raise SecurityError("La bóveda no está abierta")
+        if not isinstance(records, list):
+            raise SecurityError("Lista de notas inválida")
+        notes = [decrypt_note(self.vault_key, self.username, record) for record in records]
+        notes.sort(key=lambda note: note.get("updated_at", ""), reverse=True)
+        return notes
+
+    def registrar_usuario(self, data: dict[str, Any]) -> dict[str, Any] | None:
+        password = data.get("password")
+        if not isinstance(password, str):
+            self.last_error = "Contraseña inválida"
+            return None
+        try:
+            vault_key, vault = create_vault(password)
+            payload = dict(data)
+            payload["vault"] = vault
+            response, status = self._secure_post("/register", payload)
+            if response is None or status != 201 or response.get("status") != "ok":
                 return None
-            
-            respuesta = self._decrypt_response(response.json())
-            if respuesta and respuesta.get("status") == "ok":
-                print(f"[Cliente] Login EXITOSO. Datos de usuario recibidos.")
-                return respuesta
-            
-            print(f"[Cliente] Login fallido tras descifrar respuesta: {respuesta.get('message')}")
-            return None
-        except Exception as e:
-            print(f"[Cliente] Error crítico durante login: {e}")
+            username = response.get("usuario")
+            if not isinstance(username, str):
+                raise SecurityError("El servidor no devolvió un usuario válido")
+            self.username = username
+            self.vault_key = vault_key
+            return {"usuario": username, "notes": []}
+        except Exception as exc:
+            self.last_error = f"No se pudo crear la bóveda: {exc}"
+            self._clear_identity()
             return None
 
-    def registrar_usuario(self, datos_usuario: Dict[str, Any]):
-        if not self.session_key: return None
-        usuario = datos_usuario.get('usuario', 'Desconocido')
-        print(f"\n[Cliente] Iniciando proceso de REGISTRO para usuario: '{usuario}'")
-
+    def validar_login(self, data: dict[str, Any]) -> dict[str, Any] | None:
+        password = data.get("password")
+        if not isinstance(password, str):
+            self.last_error = "Credenciales inválidas"
+            return None
+        response, status = self._secure_post("/login", data)
+        if response is None or status != 200 or response.get("status") != "ok":
+            return None
         try:
-            mensaje = {"id_cliente": self.id_cliente}
-            mensaje.update(self._encrypt_mensaje(datos_usuario))
-
-            response = requests.post(f"{self.servidor_url}/register", json=mensaje, timeout=2)
-            
-            if response.status_code != 200:
-                # Intento leer el mensaje de error del servidor si viene en JSON plano
-                try:
-                    error_msg = response.json().get("message", "Error desconocido")
-                except:
-                    error_msg = f"Status {response.status_code}"
-                print(f"[Cliente] Registro RECHAZADO por el servidor: {error_msg}")
-                return None
-
-            respuesta = self._decrypt_response(response.json())
-            if respuesta and respuesta.get("status") == "ok":
-                print(f"[Cliente] Registro EXITOSO. Usuario creado.")
-                return respuesta
-            
-            print(f"[Cliente] Registro fallido tras descifrar respuesta: {respuesta.get('message')}")
-            return None
-        except Exception as e:
-            print(f"[Cliente] Error crítico durante registro: {e}")
+            username = response.get("usuario")
+            vault = response.get("vault")
+            if not isinstance(username, str) or not isinstance(vault, dict):
+                raise SecurityError("Respuesta de login inválida")
+            vault_key = unwrap_vault_key(password, vault)
+            self.username = username
+            self.vault_key = vault_key
+            notes = self._decrypt_note_records(response.get("notes"))
+            self.last_error = ""
+            return {"usuario": username, "notes": notes}
+        except Exception as exc:
+            self.last_error = f"No se pudo abrir la bóveda: {exc}"
+            self._clear_identity()
             return None
 
-    def actualizar(self, datos: Dict[str, Any]):
-        if not self.session_key: return
-        print(f"\n[Cliente] Sincronizando datos con servidor (Cookies/Mejoras)...")
+    def listar_notas(self) -> list[dict[str, str]] | None:
+        if self.username is None or self.vault_key is None:
+            self.last_error = "No hay un usuario autenticado"
+            return None
+        response, status = self._secure_post("/notes/list", {})
+        if response is None or status != 200 or response.get("status") != "ok":
+            return None
         try:
-            mensaje = {"id_cliente": self.id_cliente}
-            #Añadimos los nuevos datos
-            mensaje.update(self._encrypt_mensaje(datos))
-            response = requests.post(f"{self.servidor_url}/update-data", json=mensaje, timeout=2)
-            
-            if response.status_code != 200:
-                # Intento leer el mensaje de error del servidor si viene en JSON plano
-                try:
-                    error_msg = response.json().get("message", "Error desconocido")
-                except:
-                    error_msg = f"Status {response.status_code}"
-                print(f"[Cliente] UPDATE RECHAZADO por el servidor: {error_msg}")
-                return None
-            
-            respuesta = self._decrypt_response(response.json())
-            if respuesta and respuesta.get("status") == "ok":
-                print(f"[Cliente] UPDATE EXITOSO. Datos guardados.")
-                return respuesta
-            
-            print(f"[Cliente] Update fallido tras descifrar respuesta: {respuesta.get('message')}")
-            return None
-        except Exception as e:
-            print(f"[Cliente] Fallo de conexión al actualizar: {e}")
+            return self._decrypt_note_records(response.get("notes"))
+        except SecurityError as exc:
+            self.last_error = str(exc)
             return None
 
-    def logout(self, nombre_usuario) -> bool:
-        if not nombre_usuario: return False
-        print(f"\n[Cliente] Cerrando sesión de '{nombre_usuario}'...")
-        try: 
-            mensaje = {"usuario": nombre_usuario, "id_cliente": self.id_cliente}
-            response = requests.post(f"{self.servidor_url}/logout", json=mensaje, timeout=2)
-            
-            if response.status_code != 200:
-                # Intento leer el mensaje de error del servidor si viene en JSON plano
-                try:
-                    error_msg = response.json().get("message", "Error desconocido")
-                except:
-                    error_msg = f"Status {response.status_code}"
-                print(f"[Cliente] LOGOUT RECHAZADO por el servidor: {error_msg}")
-                return False
-            
-            respuesta = self._decrypt_response(response.json())
-            if respuesta and respuesta.get("status") == "ok":
-                print(f"[Cliente] LOGOUT EXITOSO. Salida de sesion.")
-                return True
-            
-            print(f"[Cliente] LOGOUT fallido tras descifrar respuesta: {respuesta.get('message')}")
-            return False
-            
-        except Exception as e: 
-            print(f"[Cliente] Error al enviar logout: {e}")
-            return False
+    def guardar_nota(
+        self, title: str, content: str, note_id: str | None = None
+    ) -> list[dict[str, str]] | None:
+        if self.username is None or self.vault_key is None:
+            self.last_error = "No hay un usuario autenticado"
+            return None
+        try:
+            record = encrypt_note(
+                self.vault_key, self.username, title, content, note_id
+            )
+        except ValueError as exc:
+            self.last_error = str(exc)
+            return None
+        response, status = self._secure_post("/notes/save", {"note": record})
+        if response is None or status != 200 or response.get("status") != "ok":
+            return None
+        return self.listar_notas()
+
+    def eliminar_nota(self, note_id: str) -> list[dict[str, str]] | None:
+        if self.username is None:
+            self.last_error = "No hay un usuario autenticado"
+            return None
+        response, status = self._secure_post("/notes/delete", {"id": note_id})
+        if response is None or status != 200 or response.get("status") != "ok":
+            return None
+        return self.listar_notas()
+
+    def logout(self) -> bool:
+        if self.username is None:
+            self._clear_identity()
+            self._clear_transport()
+            return True
+        response, status = self._secure_post("/logout", {})
+        success = response is not None and status == 200 and response.get("status") == "ok"
+        self._clear_identity()
+        self._clear_transport()
+        return success

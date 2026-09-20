@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+cripto_cookie/certificados/*.key
+cripto_cookie/certificados/*.crt
+cripto_cookie/pseudoservidor/datos/
+cripto_cookie/logs/
+.coverage
+.pytest_cache/

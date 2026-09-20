@@ -1,395 +1,373 @@
-import pygame
-from core import settings
-from entities.formularios import FormularioRegistro, FormularioLogin
+"""Interfaz Pygame para listar y editar notas de texto."""
 
-class Mejora:
-    """Clase para representar una mejora/upgrade del juego"""
-    def __init__(self, nombre, descripcion, precio_base, multiplicador_precio, efecto_tipo, efecto_valor):
-        self.nombre = nombre
-        self.descripcion = descripcion
-        self.precio_base = precio_base
-        self.multiplicador_precio = multiplicador_precio
-        self.efecto_tipo = efecto_tipo  # "click_power" o "auto_click"
-        self.efecto_valor = efecto_valor
-        self.nivel = 0
-    
-    def get_precio_actual(self):
-        """Calcular el precio actual basado en el nivel"""
-        return int(self.precio_base * (self.multiplicador_precio ** self.nivel))
-    
-    def get_efecto_total(self):
-        """Calcular el efecto total actual"""
-        return self.efecto_valor * self.nivel
-    
-    def to_dict(self):
-        """Convertir a diccionario para guardar en JSON"""
-        return {
-            "nombre": self.nombre,
-            "nivel": self.nivel
-        }
-    
-    def from_dict(self, data:dict):
-        """Cargar desde diccionario del JSON"""
-        self.nivel = data["nivel"]
+from __future__ import annotations
+
+import textwrap
+from typing import Any
+
+import pygame
+
+from core import settings
+from core.crypto_utils import MAX_NOTE_CONTENT, MAX_NOTE_TITLE
+from entities.formularios import CampoTexto, FormularioLogin, FormularioRegistro
+
 
 class Boton:
-    def __init__(self, x, y, width, height, text, color=settings.GRAY, text_color=settings.BLACK):
-        self.rect = pygame.Rect(x, y, width, height)
-        self.color = color
-        self.hover_color = (min(255, color[0] + 30), min(255, color[1] + 30), min(255, color[2] + 30))
-        self.text_color = text_color
+    def __init__(
+        self,
+        rect: pygame.Rect,
+        text: str,
+        color: tuple[int, int, int] = settings.PRIMARY,
+    ):
+        self.rect = rect
         self.text = text
-        self.font = pygame.font.Font(pygame.font.get_default_font(), 18)
-        self.is_hovered = False
-        
-    def handle_event(self, event):
+        self.color = color
+        self.hovered = False
+        self.font = pygame.font.Font(None, 23)
+
+    def handle_event(self, event: pygame.event.Event) -> bool:
         if event.type == pygame.MOUSEMOTION:
-            self.is_hovered = self.rect.collidepoint(event.pos)
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            if self.rect.collidepoint(event.pos):
-                return True
-        return False
-    
-    def draw(self, surface):
-        if self.is_hovered:
-            color = self.hover_color
-        else:
-            color = self.color
-        pygame.draw.rect(surface, color, self.rect)
-        pygame.draw.rect(surface, settings.BLACK, self.rect, 2)
-        
-        text_surf = self.font.render(self.text, True, self.text_color)
-        text_rect = text_surf.get_rect(center=self.rect.center)
-        surface.blit(text_surf, text_rect)
+            self.hovered = self.rect.collidepoint(event.pos)
+        return (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.rect.collidepoint(event.pos)
+        )
+
+    def draw(self, surface: pygame.Surface, text: str | None = None) -> None:
+        color = tuple(min(255, component + 18) for component in self.color) if self.hovered else self.color
+        pygame.draw.rect(surface, color, self.rect, border_radius=6)
+        rendered = self.font.render(text or self.text, True, settings.WHITE)
+        surface.blit(rendered, rendered.get_rect(center=self.rect.center))
+
+
+class EditorMultilinea:
+    """Editor sencillo, limitado y desplazable para el cuerpo de una nota."""
+
+    def __init__(self, rect: pygame.Rect):
+        self.rect = rect
+        self.text = ""
+        self.active = False
+        self.scroll = 0
+        self.font = pygame.font.Font(None, 23)
+        self.line_height = 24
+
+    def handle_event(self, event: pygame.event.Event) -> str | None:
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1:
+                self.active = self.rect.collidepoint(event.pos)
+            elif self.rect.collidepoint(event.pos) and event.button in {4, 5}:
+                self.scroll = max(0, self.scroll + (-3 if event.button == 4 else 3))
+        if event.type == pygame.MOUSEWHEEL and self.rect.collidepoint(pygame.mouse.get_pos()):
+            self.scroll = max(0, self.scroll - event.y * 3)
+        if event.type == pygame.KEYDOWN and self.active:
+            if event.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+            elif event.key == pygame.K_RETURN:
+                if event.mod & pygame.KMOD_CTRL:
+                    return "save"
+                if len(self.text) < MAX_NOTE_CONTENT:
+                    self.text += "\n"
+            elif event.key == pygame.K_TAB:
+                if len(self.text) <= MAX_NOTE_CONTENT - 4:
+                    self.text += "    "
+            elif event.key == pygame.K_ESCAPE:
+                self.active = False
+            elif event.unicode and event.unicode.isprintable() and len(self.text) < MAX_NOTE_CONTENT:
+                self.text += event.unicode
+        return None
+
+    def _wrapped_lines(self) -> list[str]:
+        width_chars = max(10, (self.rect.width - 20) // 11)
+        lines: list[str] = []
+        for paragraph in self.text.split("\n"):
+            wrapped = textwrap.wrap(
+                paragraph,
+                width=width_chars,
+                replace_whitespace=False,
+                drop_whitespace=False,
+            )
+            lines.extend(wrapped or [""])
+        return lines
+
+    def draw(self, surface: pygame.Surface) -> None:
+        border = settings.PRIMARY if self.active else settings.BORDER
+        pygame.draw.rect(surface, settings.WHITE, self.rect, border_radius=5)
+        pygame.draw.rect(surface, border, self.rect, 2, border_radius=5)
+        previous_clip = surface.get_clip()
+        surface.set_clip(self.rect.inflate(-10, -10))
+        lines = self._wrapped_lines()
+        visible_count = max(1, (self.rect.height - 16) // self.line_height)
+        self.scroll = min(self.scroll, max(0, len(lines) - visible_count))
+        for index, line in enumerate(lines[self.scroll : self.scroll + visible_count]):
+            rendered = self.font.render(line, True, settings.TEXT)
+            surface.blit(
+                rendered,
+                (self.rect.x + 9, self.rect.y + 8 + index * self.line_height),
+            )
+        if not self.text:
+            rendered = self.font.render("Escribe aquí el contenido de la nota...", True, settings.MUTED)
+            surface.blit(rendered, (self.rect.x + 9, self.rect.y + 8))
+        surface.set_clip(previous_clip)
+
 
 class Menu:
-    """Menu unificado que incluye tienda, usuario y premium store"""
-    
-    def __init__(self, width, height):
+    """Pantalla principal de CryptoNotes y modales de autenticación."""
+
+    def __init__(self, width: int, height: int):
         self.width = width
         self.height = height
-        
-        # ===== CONFIGURACIÓN DE LAYOUT =====
-        self.tienda_x = 500
-        self.tienda_y = 10
-        self.tienda_width = 420
-        self.tienda_height = height - 20
-        self.tienda_rect = pygame.Rect(self.tienda_x, self.tienda_y, self.tienda_width, self.tienda_height)
-        
-        self.panel_x = 920
-        self.panel_y = 10
-        self.panel_width = 340
-        self.panel_height = height - 20
-        
-        # ===== TIENDA DE MEJORAS =====
-        self.mejoras = [
-            Mejora("Cursor Mejorado", "+1 click por click", 15, 1.15, "click_power", 1),
-            Mejora("Doble Click", "+2 clicks por click", 100, 1.15, "click_power", 2),
-            Mejora("Auto Clicker", "1 click automático/seg", 50, 1.2, "auto_click", 1),
-            Mejora("Robot Asistente", "5 clicks automáticos/seg", 300, 1.2, "auto_click", 5),
-            Mejora("Cursor Dorado", "+5 clicks por click", 500, 1.15, "click_power", 5),
-            Mejora("Mega Cursor", "+10 clicks por click", 2000, 1.15, "click_power", 10),
-        ]
-        
-        self.ultimo_auto_click = 0
-        self.auto_click_intervalo = 1000  # 1 segundo en ms
-        
-        # ===== FUENTES =====
-        self.font_titulo = pygame.font.Font(pygame.font.get_default_font(), 22)
-        self.font_mejora = pygame.font.Font(pygame.font.get_default_font(), 16)
-        self.font_pequeno = pygame.font.Font(pygame.font.get_default_font(), 12)
-        
-        # ===== PANEL DE USUARIO =====
-        button_width = 100
-        button_height = 40
-        
-        base_x = self.panel_x + (self.panel_width - button_width) // 2
-        base_y = self.panel_y + 50
-        
-        # Botones de No-Logueado
-        self.boton_signin = Boton(base_x, base_y, button_width, button_height, 
-                                 "Sign Up", settings.GREEN, settings.WHITE)
-        self.boton_login = Boton(base_x, base_y + button_height + 10, button_width, button_height, 
-                                "Login", settings.BLUE, settings.WHITE)
-        
-        # Botones de Logueado
-        # --- MODIFICACIÓN: Aumentar el espacio entre botones ---
-        self.boton_logout = Boton(base_x, base_y + button_height + 30, button_width, button_height, 
-                                "Logout", settings.RED, settings.WHITE) # Gap de 30px
-        self.boton_guardar = Boton(base_x, base_y, button_width, button_height, 
-                                "Guardar", settings.BLUE, settings.WHITE)
-        
-        # Estado de autenticación
+        self.formulario_registro = FormularioRegistro(width, height)
+        self.formulario_login = FormularioLogin(width, height)
         self.usuario_logueado = False
         self.nombre_usuario = ""
-        
-        # Formularios
-        self.formulario_registro = FormularioRegistro(self.width, self.height)
-        self.formulario_login = FormularioLogin(self.width, self.height)
-        
-        # Notificación de guardado
-        self.notificacion_guardado_tiempo = 0
-        
-    def handle_event(self, event, cookies=0):
-        # Manejar formularios
-        if self.formulario_registro.activo:
-            resultado = self.formulario_registro.handle_event(event)
-            if resultado:
-                if isinstance(resultado, tuple) and resultado[0] == "usuario_registrado":
-                    return ("usuario_registrado", resultado[1])
-                elif resultado == "cancelar":
-                    return None
-            return None 
-            
-        if self.formulario_login.activo:
-            resultado = self.formulario_login.handle_event(event)
-            if resultado:
-                if isinstance(resultado, tuple) and resultado[0] == "intento_login":
-                    return ("intento_login", resultado[1])
-                elif resultado == "cancelar":
-                    return None
-            return None
-        
-        # Manejar tienda
-        resultado_tienda = self.handle_tienda_event(event, cookies)
-        if resultado_tienda:
-            return resultado_tienda
-        
-        # Manejar botones del panel de usuario
-        if self.usuario_logueado:
-            if self.boton_guardar.handle_event(event):
-                return "guardar_juego"
-            if self.boton_logout.handle_event(event):
-                return "logout"
-        else:
-            if self.boton_signin.handle_event(event):
-                print("Abriendo ventana de registro...")
-                self.formulario_registro.mostrar()
-                return "signin"
-            if self.boton_login.handle_event(event):
-                print("Abriendo ventana de login...")
-                self.formulario_login.mostrar()
-                return "login"
-        
-        return None
-    
-    def login_usuario(self, nombre_usuario):
-        """Función para loguear un usuario"""
+        self.notas: list[dict[str, str]] = []
+        self.nota_seleccionada_id: str | None = None
+        self.list_scroll = 0
+        self.message = ""
+        self.message_color = settings.SUCCESS
+        self.message_frames = 0
+        self.pending_delete_id: str | None = None
+        self.delete_frames = 0
+
+        self.title_font = pygame.font.Font(None, 42)
+        self.subtitle_font = pygame.font.Font(None, 27)
+        self.normal_font = pygame.font.Font(None, 23)
+        self.small_font = pygame.font.Font(None, 19)
+
+        self.boton_registro = Boton(pygame.Rect(width // 2 - 210, 420, 190, 48), "Crear cuenta", settings.SUCCESS)
+        self.boton_login = Boton(pygame.Rect(width // 2 + 20, 420, 190, 48), "Iniciar sesión")
+        self.boton_nueva = Boton(pygame.Rect(28, 92, 140, 40), "Nueva nota", settings.SUCCESS)
+        self.boton_refrescar = Boton(pygame.Rect(178, 92, 115, 40), "Actualizar")
+        self.boton_guardar = Boton(pygame.Rect(width - 430, height - 68, 130, 40), "Guardar", settings.SUCCESS)
+        self.boton_eliminar = Boton(pygame.Rect(width - 288, height - 68, 130, 40), "Eliminar", settings.DANGER)
+        self.boton_logout = Boton(pygame.Rect(width - 146, 22, 118, 38), "Salir", settings.DANGER)
+
+        self.lista_rect = pygame.Rect(28, 145, 300, height - 175)
+        self.editor_rect = pygame.Rect(354, 92, width - 382, height - 120)
+        self.campo_titulo = CampoTexto(
+            self.editor_rect.x + 24,
+            self.editor_rect.y + 65,
+            self.editor_rect.width - 48,
+            42,
+            "Título de la nota",
+            max_length=MAX_NOTE_TITLE,
+        )
+        self.editor_contenido = EditorMultilinea(
+            pygame.Rect(
+                self.editor_rect.x + 24,
+                self.editor_rect.y + 135,
+                self.editor_rect.width - 48,
+                self.editor_rect.height - 230,
+            )
+        )
+
+    def show_message(
+        self, message: str, color: tuple[int, int, int] = settings.SUCCESS
+    ) -> None:
+        self.message = message
+        self.message_color = color
+        self.message_frames = 240
+
+    def login_usuario(self, username: str, notes: list[dict[str, str]]) -> None:
         self.usuario_logueado = True
-        self.nombre_usuario = nombre_usuario
-        self.formulario_login.ocultar()
-        print(f"Usuario {nombre_usuario} logueado exitosamente")
-        
-    def logout_usuario(self):
-        """Función para desloguear un usuario"""
-        self.usuario_logueado = False
-        self.nombre_usuario = ""
-        
+        self.nombre_usuario = username
         self.formulario_login.ocultar()
         self.formulario_registro.ocultar()
-        
-        print("Usuario deslogueado")
-        
-    def update(self):
-        """Actualizar componentes que necesiten actualización por tiempo"""
-        # --- MODIFICACIÓN: Lógica del temporizador ---
-        # Mostrar la notificación de "¡Guardado!" por 2 segundos (120 frames)
-        if self.notificacion_guardado_tiempo > 0:
-            self.notificacion_guardado_tiempo -= 1
-            
-        # Llamar a update_tienda y devolver sus auto-clicks
-        return self.update_tienda() 
-        
-    def draw(self, surface, cookies=0):
-        """Dibujar tienda y panel de usuario"""
-        self.draw_tienda(surface, cookies)
-        self._draw_panel_usuario(surface)
-        
+        self.set_notas(notes)
+
+    def logout_usuario(self) -> None:
+        self.usuario_logueado = False
+        self.nombre_usuario = ""
+        self.notas = []
+        self.nota_seleccionada_id = None
+        self._clear_editor()
+
+    def set_notas(self, notes: list[dict[str, str]]) -> None:
+        previous = self.nota_seleccionada_id
+        self.notas = notes
+        if previous and any(note["id"] == previous for note in notes):
+            self._select_note(previous)
+        elif notes:
+            self._select_note(notes[0]["id"])
+        else:
+            self._clear_editor()
+
+    def _clear_editor(self) -> None:
+        self.nota_seleccionada_id = None
+        self.campo_titulo.text = ""
+        self.editor_contenido.text = ""
+        self.editor_contenido.scroll = 0
+        self.pending_delete_id = None
+
+    def _select_note(self, note_id: str) -> None:
+        note = next((item for item in self.notas if item["id"] == note_id), None)
+        if note is None:
+            return
+        self.nota_seleccionada_id = note_id
+        self.campo_titulo.text = note["title"]
+        self.editor_contenido.text = note["content"]
+        self.editor_contenido.scroll = 0
+        self.pending_delete_id = None
+
+    def update(self) -> None:
+        if self.message_frames > 0:
+            self.message_frames -= 1
+        if self.delete_frames > 0:
+            self.delete_frames -= 1
+            if self.delete_frames == 0:
+                self.pending_delete_id = None
+
+    def _visible_notes(self) -> list[dict[str, str]]:
+        item_height = 64
+        count = max(1, self.lista_rect.height // item_height)
+        max_scroll = max(0, len(self.notas) - count)
+        self.list_scroll = min(max(0, self.list_scroll), max_scroll)
+        return self.notas[self.list_scroll : self.list_scroll + count]
+
+    def handle_event(self, event: pygame.event.Event):
+        if self.formulario_registro.activo:
+            return self.formulario_registro.handle_event(event)
+        if self.formulario_login.activo:
+            return self.formulario_login.handle_event(event)
+
+        if not self.usuario_logueado:
+            if self.boton_registro.handle_event(event):
+                self.formulario_registro.mostrar()
+            elif self.boton_login.handle_event(event):
+                self.formulario_login.mostrar()
+            return None
+
+        if self.boton_logout.handle_event(event):
+            return "logout"
+        if self.boton_nueva.handle_event(event):
+            self._clear_editor()
+            self.campo_titulo.active = True
+            return None
+        if self.boton_refrescar.handle_event(event):
+            return "refrescar"
+        if self.boton_guardar.handle_event(event):
+            return (
+                "guardar_nota",
+                {
+                    "id": self.nota_seleccionada_id,
+                    "title": self.campo_titulo.text,
+                    "content": self.editor_contenido.text,
+                },
+            )
+        if self.boton_eliminar.handle_event(event):
+            if self.nota_seleccionada_id is None:
+                self.show_message("Selecciona una nota para eliminar", settings.WARNING)
+                return None
+            if self.pending_delete_id == self.nota_seleccionada_id:
+                note_id = self.nota_seleccionada_id
+                self.pending_delete_id = None
+                return "eliminar_nota", note_id
+            self.pending_delete_id = self.nota_seleccionada_id
+            self.delete_frames = 180
+            self.show_message("Pulsa Eliminar otra vez para confirmar", settings.WARNING)
+            return None
+
+        if event.type == pygame.MOUSEWHEEL and self.lista_rect.collidepoint(pygame.mouse.get_pos()):
+            self.list_scroll -= event.y
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.lista_rect.collidepoint(event.pos):
+            index = (event.pos[1] - self.lista_rect.y) // 64
+            visible = self._visible_notes()
+            if 0 <= index < len(visible):
+                self._select_note(visible[index]["id"])
+
+        title_result = self.campo_titulo.handle_event(event)
+        body_result = self.editor_contenido.handle_event(event)
+        if title_result == "enter" or body_result == "save":
+            return (
+                "guardar_nota",
+                {
+                    "id": self.nota_seleccionada_id,
+                    "title": self.campo_titulo.text,
+                    "content": self.editor_contenido.text,
+                },
+            )
+        return None
+
+    def draw(self, surface: pygame.Surface) -> None:
+        surface.fill(settings.BACKGROUND)
+        if self.usuario_logueado:
+            self._draw_authenticated(surface)
+        else:
+            self._draw_welcome(surface)
         self.formulario_registro.draw(surface)
         self.formulario_login.draw(surface)
-    
-    def _draw_panel_usuario(self, surface):
-        """Dibujar el panel de usuario"""
-        panel_rect = pygame.Rect(self.panel_x, self.panel_y, self.panel_width, self.panel_height)
-        pygame.draw.rect(surface, settings.PANEL_BROWN, panel_rect)
-        pygame.draw.rect(surface, settings.GOLDEN, panel_rect, 3)
-        
-        titulo = self.font_titulo.render("USUARIO", True, settings.TEXT_CREAM)
-        titulo_rect = titulo.get_rect(centerx=panel_rect.centerx, y=self.panel_y + 15)
-        surface.blit(titulo, titulo_rect)
-        
-        if not self.usuario_logueado and not self.formulario_registro.activo and not self.formulario_login.activo:
-            self.boton_signin.draw(surface)
-            self.boton_login.draw(surface)
-        elif self.usuario_logueado and not self.formulario_registro.activo and not self.formulario_login.activo:
-            
-            self.boton_guardar.draw(surface)
 
-            # Mostrar "¡Guardado!" si está activo
-            if self.notificacion_guardado_tiempo > 0:
-                guardado_text = self.font_mejora.render("¡Guardado!", True, settings.GREEN)
-                guardado_rect = guardado_text.get_rect(centerx=self.boton_guardar.rect.centerx,
-                                                      y=self.boton_guardar.rect.bottom + 5)
-                surface.blit(guardado_text, guardado_rect)
+    def _draw_welcome(self, surface: pygame.Surface) -> None:
+        card = pygame.Rect(self.width // 2 - 330, 125, 660, 420)
+        pygame.draw.rect(surface, settings.PANEL, card, border_radius=14)
+        pygame.draw.rect(surface, settings.PRIMARY, card, 3, border_radius=14)
+        title = self.title_font.render("CryptoNotes", True, settings.TEXT)
+        surface.blit(title, title.get_rect(centerx=card.centerx, y=175))
+        subtitle = self.subtitle_font.render("Notas de texto cifradas de extremo a extremo", True, settings.MUTED)
+        surface.blit(subtitle, subtitle.get_rect(centerx=card.centerx, y=235))
+        descriptions = (
+            "AES-256-GCM para confidencialidad e integridad",
+            "scrypt para proteger contraseñas y la clave de la bóveda",
+            "RSA-PSS y PKI para autenticar al servidor",
+            "Protección frente a mensajes manipulados y repetidos",
+        )
+        for index, description in enumerate(descriptions):
+            rendered = self.normal_font.render(f"• {description}", True, settings.TEXT)
+            surface.blit(rendered, (card.x + 90, 295 + index * 31))
+        self.boton_registro.draw(surface)
+        self.boton_login.draw(surface)
 
-            self.boton_logout.draw(surface)
-            
-            # Mostrar información del usuario
-            welcome_text = self.font_mejora.render(f"Bienvenido!", True, settings.TEXT_CREAM)
-            user_text = self.font_mejora.render(f"{self.nombre_usuario}", True, settings.GOLDEN)
-            
-            surface.blit(welcome_text, (self.panel_x + 20, self.boton_logout.rect.bottom + 30))
-            surface.blit(user_text, (self.panel_x + 20, self.boton_logout.rect.bottom + 50))
-    
-    def mostrar_notificacion_guardado(self):
-        """Activa el temporizador para el mensaje "¡Guardado!"""
-        # 120 frames = 2 segundos a 60 FPS
-        self.notificacion_guardado_tiempo = 120 
+    def _draw_authenticated(self, surface: pygame.Surface) -> None:
+        header = pygame.Rect(0, 0, self.width, 76)
+        pygame.draw.rect(surface, settings.PANEL, header)
+        pygame.draw.line(surface, settings.BORDER, (0, 75), (self.width, 75), 1)
+        title = self.title_font.render("CryptoNotes", True, settings.TEXT)
+        surface.blit(title, (28, 20))
+        user = self.normal_font.render(f"Bóveda de {self.nombre_usuario}", True, settings.MUTED)
+        surface.blit(user, (225, 31))
+        self.boton_logout.draw(surface)
+        self.boton_nueva.draw(surface)
+        self.boton_refrescar.draw(surface)
 
-    # ===== MÉTODOS DE LA TIENDA DE MEJORAS =====
-    
-    def update_tienda(self):
-        """Actualizar auto-clickers de la tienda (asume 60 FPS)"""
-        self.ultimo_auto_click += 16
-        auto_clicks = 0
-        
-        if self.ultimo_auto_click >= self.auto_click_intervalo:
-            total_auto_power = 0
-            for mejora in self.mejoras:
-                if mejora.efecto_tipo == "auto_click":
-                    total_auto_power += mejora.get_efecto_total()
-            
-            if total_auto_power > 0:
-                auto_clicks = total_auto_power
-                self.ultimo_auto_click = 0
-        
-        return auto_clicks
-    
-    def click_power(self):
-        """Obtener el poder total de click"""
-        base_power = 1
-        bonus_power = 0
-        for mejora in self.mejoras:
-            if mejora.efecto_tipo == "click_power":
-                bonus_power += mejora.get_efecto_total()
-        
-        return base_power + bonus_power
-    
-    def auto_click_rate(self):
-        """Obtener la tasa de auto-clicks por segundo"""
-        auto_click_total = 0
-        for mejora in self.mejoras:
-            if mejora.efecto_tipo == "auto_click":
-                auto_click_total += mejora.get_efecto_total()
-        return auto_click_total
-    
-    def handle_tienda_event(self, event, cookies):
-        """Manejar eventos específicos de la tienda (sin scroll)"""
-        if event.type == pygame.MOUSEBUTTONDOWN and self.tienda_rect.collidepoint(event.pos):
-            mouse_x, mouse_y = event.pos
-            relative_y = mouse_y - self.tienda_y - 100
-            mejora_index = int(relative_y // 80)
-            if 0 <= mejora_index < len(self.mejoras):
-                mejora = self.mejoras[mejora_index]
-                precio = mejora.get_precio_actual()
-                if cookies >= precio:
-                    mejora.nivel += 1
-                    print(f"¡Comprada mejora: {mejora.nombre} (Nivel {mejora.nivel}) por {precio} cookies!")
-                    return ("compra_mejora", {"mejora": mejora.nombre, "precio": precio, "nivel": mejora.nivel})
-                else:
-                    print(f"No tienes suficientes cookies para {mejora.nombre} (necesitas {precio}, tienes {cookies})")
-        return None
-    
-    def draw_tienda(self, surface, cookies):
-        """Dibujar la tienda de mejoras (sin scroll)"""
-        pygame.draw.rect(surface, settings.PANEL_BROWN, self.tienda_rect)
-        pygame.draw.rect(surface, settings.GOLDEN, self.tienda_rect, 3)
-        
-        titulo = self.font_titulo.render("TIENDA", True, settings.TEXT_CREAM)
-        titulo_rect = titulo.get_rect(centerx=self.tienda_rect.centerx, y=self.tienda_y + 15)
-        surface.blit(titulo, titulo_rect)
-        
-        cookies_text = self.font_mejora.render(f"Cookies: {cookies:,}", True, settings.GOLDEN)
-        surface.blit(cookies_text, (self.tienda_x + 15, self.tienda_y + 50))
-        
-        click_power = self.click_power()
-        auto_rate = self.auto_click_rate()
-        stats_text = self.font_pequeno.render(f"{click_power}/click | {auto_rate}/seg", True, settings.ACCENT_GOLD)
-        surface.blit(stats_text, (self.tienda_x + 15, self.tienda_y + 75))
-        
-        y_offset = 0
-        area_altura = self.tienda_height - 120
-        max_items = min(len(self.mejoras), area_altura // 80)
-        for i in range(max_items):
-            mejora = self.mejoras[i]
-            self._draw_mejora(surface, mejora, self.tienda_x + 20, self.tienda_y + 100 + y_offset, cookies)
-            y_offset += 80
-    
-    def _draw_mejora(self, surface, mejora, x, y, cookies):
-        """Dibujar una mejora individual"""
-        precio = mejora.get_precio_actual()
-        puede_comprar = cookies >= precio
-        
-        if puede_comprar:
-            color_fondo = settings.LIGHT_BROWN
-            borde_color = settings.GOLDEN
-            borde_width = 3
-            nombre_color = settings.TEXT_CREAM
-            precio_color = settings.GOLDEN
-        else:
-            color_fondo = settings.DARK_BROWN
-            borde_color = settings.GRAY
-            borde_width = 1
-            nombre_color = settings.GRAY
-            precio_color = settings.RED
-        
-        mejora_rect = pygame.Rect(x, y, self.tienda_width - 50, 75)
-        pygame.draw.rect(surface, color_fondo, mejora_rect)
-        pygame.draw.rect(surface, borde_color, mejora_rect, borde_width)
-        
-        if puede_comprar:
-            highlight_rect = pygame.Rect(x + 2, y + 2, self.tienda_width - 54, 3)
-            pygame.draw.rect(surface, settings.GOLDEN, highlight_rect)
-        
-        nombre_text = self.font_mejora.render(f"{mejora.nombre} (Nv.{mejora.nivel})", True, nombre_color)
-        surface.blit(nombre_text, (x + 40, y + 8))
-        
-        desc_text = self.font_pequeno.render(mejora.descripcion, True, settings.CREAM)
-        surface.blit(desc_text, (x + 40, y + 28))
-        
-        precio_text = self.font_pequeno.render(f" {precio:,} cookies", True, precio_color)
-        surface.blit(precio_text, (x + 40, y + 48))
-        
-        if mejora.nivel > 0:
-            efecto_total = mejora.get_efecto_total()
-            efecto_text = self.font_pequeno.render(f"Efecto: +{efecto_total}", True, settings.ACCENT_GOLD)
-            surface.blit(efecto_text, (x + 40, y + 60))
-        
-        if puede_comprar:
-            click_hint = self.font_pequeno.render("[ CLICK PARA COMPRAR ]", True, settings.GOLDEN)
-            text_rect = click_hint.get_rect(right=mejora_rect.right - 10, bottom=mejora_rect.bottom - 5)
-            surface.blit(click_hint, text_rect)
-    
-    def get_mejoras_data(self):
-        """Obtener datos de mejoras para guardar en JSON"""
-        resultados = []
-        for mejora in self.mejoras:
-            resultados.append(mejora.to_dict())
-        return resultados
-    
-    def load_mejoras_data(self, data):
-        """Cargar datos de mejoras desde JSON"""
-        if not data:
-            return
-        for mejora_data in data:
-            nombre = mejora_data["nombre"]
-            for mejora in self.mejoras:
-                if mejora.nombre == nombre:
-                    mejora.from_dict(mejora_data)
+        pygame.draw.rect(surface, settings.PANEL, self.lista_rect, border_radius=8)
+        pygame.draw.rect(surface, settings.BORDER, self.lista_rect, 1, border_radius=8)
+        visible = self._visible_notes()
+        for index, note in enumerate(visible):
+            item = pygame.Rect(
+                self.lista_rect.x + 4,
+                self.lista_rect.y + index * 64 + 4,
+                self.lista_rect.width - 8,
+                56,
+            )
+            color = settings.SELECTION if note["id"] == self.nota_seleccionada_id else settings.PANEL_ALT
+            pygame.draw.rect(surface, color, item, border_radius=5)
+            title_text = note["title"][:31]
+            title_rendered = self.normal_font.render(title_text, True, settings.TEXT)
+            surface.blit(title_rendered, (item.x + 10, item.y + 8))
+            date_rendered = self.small_font.render(note.get("updated_at", "")[:16].replace("T", " "), True, settings.MUTED)
+            surface.blit(date_rendered, (item.x + 10, item.y + 33))
+        if not self.notas:
+            empty = self.normal_font.render("Todavía no hay notas", True, settings.MUTED)
+            surface.blit(empty, empty.get_rect(center=self.lista_rect.center))
 
-    # Wrappers para mantener compatibilidad con core
-    def get_click_power(self):
-        return self.click_power()
+        pygame.draw.rect(surface, settings.PANEL, self.editor_rect, border_radius=8)
+        pygame.draw.rect(surface, settings.BORDER, self.editor_rect, 1, border_radius=8)
+        heading = "Editar nota" if self.nota_seleccionada_id else "Nueva nota"
+        rendered_heading = self.subtitle_font.render(heading, True, settings.TEXT)
+        surface.blit(rendered_heading, (self.editor_rect.x + 24, self.editor_rect.y + 22))
+        self.campo_titulo.draw(surface)
+        self.editor_contenido.draw(surface)
+        counter = self.small_font.render(
+            f"{len(self.editor_contenido.text)}/{MAX_NOTE_CONTENT} caracteres",
+            True,
+            settings.MUTED,
+        )
+        surface.blit(counter, (self.editor_contenido.rect.x, self.editor_contenido.rect.bottom + 8))
+        self.boton_guardar.draw(surface)
+        delete_label = "Confirmar" if self.pending_delete_id else "Eliminar"
+        self.boton_eliminar.draw(surface, delete_label)
 
-    def get_auto_click_rate(self):
-        return self.auto_click_rate()
+        if self.message_frames > 0 and self.message:
+            rendered = self.normal_font.render(self.message, True, self.message_color)
+            surface.blit(rendered, (354, self.height - 55))

@@ -1,183 +1,227 @@
-from OpenSSL import crypto
-import random
+"""Genera la PKI local de CryptoNotes sin contraseñas incrustadas en código."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import ipaddress
 import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-#Guardamos las rutas
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVER_DIR = os.path.join(BASE_DIR, "pseudoservidor")
-os.makedirs(SERVER_DIR, exist_ok=True)
-
-#Func auxiliares
-def guardar_archivo(contenido, ruta):
-    with open(ruta, "wb") as f:
-        f.write(contenido)
-
-def leer_clave_privada(ruta, passphrase=None):
-    with open(ruta, "rb") as f:
-        # Pasamos la passphrase a load_privatekey
-        return crypto.load_privatekey(crypto.FILETYPE_PEM, f.read(), passphrase)
-
-def leer_certificado(ruta):
-    with open(ruta, "rb") as f:
-        return crypto.load_certificate(crypto.FILETYPE_PEM, f.read())
-
-#Generamos la ca raiz (se autofirma)
-def generar_root_ca(cn_name, key_file, cert_file, your_passphrase=None):
-    print(f"--- [Nivel 1] Generando Root CA: {cn_name} ---")
-    k = crypto.PKey()
-    k.generate_key(crypto.TYPE_RSA, 4096)
-
-    cert = crypto.X509()
-    subject = cert.get_subject()
-    subject.C = "ES"
-    subject.O = "Cookie Clicker Corp"
-    subject.CN = cn_name
-    
-    cert.set_issuer(subject)
-    cert.set_pubkey(k)
-    cert.set_serial_number(random.randint(1, 10000))
-    cert.gmtime_adj_notBefore(0)
-    cert.gmtime_adj_notAfter(20*365*24*60*60) 
-    cert.set_version(2) 
-
-    cert.add_extensions([
-        crypto.X509Extension(b"basicConstraints", True, b"CA:TRUE"),
-        crypto.X509Extension(b"keyUsage", True, b"keyCertSign, cRLSign"),
-        crypto.X509Extension(b"subjectKeyIdentifier", False, b"hash", subject=cert),
-    ])
-
-    cert.sign(k, 'sha256')
-    
-    # Contraseña para cifrar la clave privada de root_ca
-    guardar_archivo(crypto.dump_privatekey(crypto.FILETYPE_PEM, k, 
-                                           cipher="aes-256-cbc", 
-                                           passphrase=your_passphrase), 
-                    key_file)
-    #Guardamos el certificado tmb
-    guardar_archivo(crypto.dump_certificate(crypto.FILETYPE_PEM, cert), cert_file)
-    print(f" -> Guardada Root CA en: {cert_file}")
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
-# --- Añadir parámetro parent_passphrase ---
-def generar_certificado_firmado(cn_name, parent_key_path, parent_cert_path, out_key_path, out_cert_path, 
-                                es_autoridad=False, parent_passphrase=None, your_passphrase=None):
-    """
-    Genera un certificado firmado por una entidad superior (padre).
-    """
-    if es_autoridad:
-        tipo = "Subordinada"
-    else: 
-        tipo = "Servidor Final"
-    print(f"\n--- Generando {tipo}: {cn_name} ---")
-    
-    # Cargar identidad del Padre USANDO LA CONTRASEÑA
-    parent_key = leer_clave_privada(parent_key_path, passphrase=parent_passphrase)
-    parent_cert = leer_certificado(parent_cert_path)
-
-    # Generar nueva clave para este hijo (privada y publica)
-    k_child = crypto.PKey()
-    k_child.generate_key(crypto.TYPE_RSA, 2048)
-
-    # Configurar Certificado
-    cert = crypto.X509()
-    subject = cert.get_subject()
-    subject.C = "ES"
-    subject.O = "Cookie Clicker Corp"
-    subject.CN = cn_name
-    if es_autoridad:
-        subject.OU = "Seguridad PKI"
-    else:
-        subject.OU = "Servidores Web"
-
-    cert.set_issuer(parent_cert.get_subject())
-    cert.set_pubkey(k_child)
-    cert.set_serial_number(random.randint(1, 10000))
-    cert.gmtime_adj_notBefore(0)
-    
-    #10 añitos
-    dias_validez = 3650
-    cert.gmtime_adj_notAfter(dias_validez * 24 * 60 * 60)
-    #Version 3 realmente para las extensiones
-    cert.set_version(2)
-
-    extensions = []
-    
-    extensions.append(crypto.X509Extension(b"authorityKeyIdentifier", False, b"keyid:always", issuer=parent_cert))
-    extensions.append(crypto.X509Extension(b"subjectKeyIdentifier", False, b"hash", subject=cert))
-
-    if es_autoridad:
-        #Le damos permiso para firmar mas certificados
-        extensions.append(crypto.X509Extension(b"basicConstraints", True, b"CA:TRUE, pathlen:0"))
-        
-        extensions.append(crypto.X509Extension(b"keyUsage", True, b"keyCertSign, cRLSign"))
-    else:
-        #No puede firmar otros certificados
-        extensions.append(crypto.X509Extension(b"basicConstraints", True, b"CA:FALSE"))
-        # Sirve para el handshake TLS (HTTPS).
-        extensions.append(crypto.X509Extension(b"keyUsage", True, b"digitalSignature, keyEncipherment"))
-        #Pseudonimos
-        extensions.append(crypto.X509Extension(b"subjectAltName", False, f"DNS:{cn_name}, DNS:localhost, IP:127.0.0.1".encode("utf-8")))
-
-    cert.add_extensions(extensions)
-
-    # FIRMAR CON LA CLAVE DEL PADRE (ya descifrada)
-    cert.sign(parent_key, 'sha256')
-
-    # Guardar la clave del hijo (Cifrada con su propia contraseña)
-    guardar_archivo(crypto.dump_privatekey(crypto.FILETYPE_PEM, 
-                                           k_child, 
-                                           cipher="aes-256-cbc", 
-                                           passphrase=your_passphrase), 
-                    out_key_path)
-    #Guardamos el certificado tmb
-    guardar_archivo(crypto.dump_certificate(crypto.FILETYPE_PEM, cert), out_cert_path)
-    print(f" -> Guardado {tipo} en: {out_cert_path}")
+BASE_DIR = Path(__file__).resolve().parent
+CERT_DIR = BASE_DIR / "certificados"
 
 
-def generar_todo():
-    # Rutas de archivos
-    root_key = os.path.join(BASE_DIR, "root_ca.key")
-    root_crt = os.path.join(BASE_DIR, "root_ca.crt")
-    root_key_password = b"secreto_raiz"
-    sub_key = os.path.join(SERVER_DIR, "sub_ca.key")
-    sub_crt = os.path.join(SERVER_DIR, "sub_ca.crt")
-    sub_key_password = b"secreto_AC_subordinada"
-    server_key = os.path.join(SERVER_DIR, "server.key")
-    server_crt = os.path.join(SERVER_DIR, "server.crt")
-    server_key_password = b"secreto_de_servidor"
+def _password(environment_name: str, label: str) -> bytes:
+    value = os.environ.get(environment_name)
+    if value is None:
+        value = getpass.getpass(f"Contraseña para {label} (mínimo 12 caracteres): ")
+        confirmation = getpass.getpass("Repite la contraseña: ")
+        if value != confirmation:
+            raise ValueError("Las contraseñas no coinciden")
+    if len(value) < 12:
+        raise ValueError(f"La contraseña de {label} es demasiado corta")
+    return value.encode("utf-8")
 
-    print("=== INICIANDO GENERACIÓN DE PKI (LÓGICA UNIFICADA) ===")
-    
-    # Generar Raíz (Se cifra con su misma clave)
-    generar_root_ca("Cookie Root CA", root_key, root_crt,root_key_password)
-    
-    # Generar Subordinada 
-    # Como necesita leer la clave privada de la raiz la pasamos como argumento
-    generar_certificado_firmado(
-        cn_name="Cookie Sub CA", 
-        parent_key_path=root_key, 
-        parent_cert_path=root_crt, 
-        out_key_path=sub_key, 
-        out_cert_path=sub_crt, 
-        es_autoridad=True,
-        parent_passphrase=root_key_password,
-        your_passphrase=sub_key_password
+
+def _name(common_name: str, unit: str) -> x509.Name:
+    return x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "ES"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "CryptoNotes"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, unit),
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+        ]
     )
-    
-    # Generar Servidor
-    # Como necesita leer la clave privada de la AC intermedia la pasamos como argumento
-    generar_certificado_firmado(
-        cn_name="localhost", 
-        parent_key_path=sub_key, 
-        parent_cert_path=sub_crt, 
-        out_key_path=server_key, 
-        out_cert_path=server_crt, 
-        es_autoridad=False,
-        parent_passphrase=sub_key_password,
-        your_passphrase=server_key_password
+
+
+def _write_private_key(path: Path, key: rsa.RSAPrivateKey, password: bytes) -> None:
+    path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(password),
+        )
     )
-    
-    print("\n=== PKI GENERADA CORRECTAMENTE ===")
+    os.chmod(path, 0o600)
+
+
+def _write_certificate(path: Path, certificate: x509.Certificate) -> None:
+    path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    os.chmod(path, 0o644)
+
+
+def generate_pki(force: bool = False) -> None:
+    CERT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths = {
+        "root_key": CERT_DIR / "root_ca.key",
+        "root_cert": CERT_DIR / "root_ca.crt",
+        "sub_key": CERT_DIR / "sub_ca.key",
+        "sub_cert": CERT_DIR / "sub_ca.crt",
+        "server_key": CERT_DIR / "server.key",
+        "server_cert": CERT_DIR / "server.crt",
+    }
+    existing = [path for path in paths.values() if path.exists()]
+    if len(existing) == len(paths) and not force:
+        print("La PKI ya existe. Usa --force solo si quieres reemplazarla.")
+        return
+    if existing and not force:
+        raise RuntimeError(
+            "La PKI está incompleta. Revísala o ejecuta con --force para regenerarla."
+        )
+
+    root_password = _password("CRYPTONOTES_ROOT_CA_PASSWORD", "la CA raíz")
+    intermediate_password = _password(
+        "CRYPTONOTES_SUB_CA_PASSWORD", "la CA intermedia"
+    )
+    server_password = _password(
+        "CRYPTONOTES_SERVER_KEY_PASSWORD", "el servidor"
+    )
+
+    now = datetime.now(timezone.utc)
+    root_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    root_subject = _name("CryptoNotes Root CA", "Autoridad raíz")
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(root_subject)
+        .issuer_name(root_subject)
+        .public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=None,
+                decipher_only=None,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+
+    intermediate_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    intermediate_subject = _name("CryptoNotes Intermediate CA", "Autoridad intermedia")
+    intermediate_cert = (
+        x509.CertificateBuilder()
+        .subject_name(intermediate_subject)
+        .issuer_name(root_cert.subject)
+        .public_key(intermediate_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1825))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=None,
+                decipher_only=None,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(intermediate_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()),
+            critical=False,
+        )
+        .sign(root_key, hashes.SHA256())
+    )
+
+    server_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    server_subject = _name("localhost", "Servidor")
+    server_cert = (
+        x509.CertificateBuilder()
+        .subject_name(server_subject)
+        .issuer_name(intermediate_cert.subject)
+        .public_key(server_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=825))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=None,
+                decipher_only=None,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
+        )
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                ]
+            ),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(server_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                intermediate_key.public_key()
+            ),
+            critical=False,
+        )
+        .sign(intermediate_key, hashes.SHA256())
+    )
+
+    _write_private_key(paths["root_key"], root_key, root_password)
+    _write_certificate(paths["root_cert"], root_cert)
+    _write_private_key(paths["sub_key"], intermediate_key, intermediate_password)
+    _write_certificate(paths["sub_cert"], intermediate_cert)
+    _write_private_key(paths["server_key"], server_key, server_password)
+    _write_certificate(paths["server_cert"], server_cert)
+    print(f"PKI generada en {CERT_DIR}")
+    print("Las claves privadas están cifradas y no deben añadirse al repositorio.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Genera la PKI local de CryptoNotes")
+    parser.add_argument(
+        "--force", action="store_true", help="reemplaza una PKI existente"
+    )
+    args = parser.parse_args()
+    generate_pki(force=args.force)
+
 
 if __name__ == "__main__":
-    generar_todo()
+    main()

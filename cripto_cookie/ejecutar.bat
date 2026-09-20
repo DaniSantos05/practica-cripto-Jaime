@@ -1,31 +1,18 @@
-@REM Comprobar y crear entorno virtual si no existe
-if not exist ".venv" (
-    echo Creando entorno virtual en .venv...
-    py -m venv ".venv"
-    if errorlevel 1 (
-        echo Error al crear el entorno virtual.
-        PAUSE
-        exit /b 1
-    )
-) else (
-    echo Entorno virtual ya existe.
+@echo off
+cd /d "%~dp0"
+
+if not exist ".venv" py -m venv .venv
+if errorlevel 1 exit /b 1
+
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if errorlevel 1 exit /b 1
+
+if not exist "certificados\server.key" (
+    ".venv\Scripts\python.exe" generar_pki.py
+    if errorlevel 1 exit /b 1
 )
 
-@REM Actualizar pip y verificar/instalar dependencias (SIEMPRE)
-".venv\Scripts\python.exe" -m pip install -r "requirements.txt"
-if errorlevel 1 (
-    echo Error al instalar/verificar dependencias.
-    PAUSE
-    exit /b 1
-)
-echo Creando los certificados
-".venv\Scripts\python.exe" generar_pki.py
-
-@REM Lanzar los scripts
-echo Lanzando el servidor...
-START "Ventana del Servidor" ".venv\Scripts\python.exe" pseudoservidor/servidor.py
-
-@REM Esperar un momento para que el servidor inicie
-TIMEOUT /T 2
-echo Lanzando el programa principal...
+echo El servidor pedira la contrasena de su clave privada en otra ventana.
+start "Servidor CryptoNotes" cmd /k ".venv\Scripts\python.exe -m pseudoservidor.servidor"
+timeout /t 2 /nobreak >nul
 ".venv\Scripts\python.exe" main.py

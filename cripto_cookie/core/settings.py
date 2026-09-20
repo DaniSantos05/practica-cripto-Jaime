@@ -1,40 +1,27 @@
-"""
-Configuración global del juego Cookie Clicker
-Incluye colores del tema Cookie Clicker y configuraciones de pantalla
-"""
+"""Configuración visual de CryptoNotes."""
 
-# ===== CONFIGURACIÓN DE PANTALLA =====
-WIDTH = 1260
+WIDTH = 1180
 HEIGHT = 720
 FPS = 60
-TITLE = "Cookie Clicker"
+TITLE = "CryptoNotes - Notas de texto seguras"
 
-# ===== COLORES BÁSICOS =====
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-RED = (200, 50, 50)
-GREEN = (50, 200, 50)
-BLUE = (50, 50, 200)
-YELLOW = (200, 200, 50)
-GRAY = (100, 100, 100)
+WHITE = (248, 250, 252)
+BLACK = (15, 23, 42)
+BACKGROUND = (226, 232, 240)
+PANEL = (255, 255, 255)
+PANEL_ALT = (241, 245, 249)
+BORDER = (148, 163, 184)
+PRIMARY = (37, 99, 235)
+PRIMARY_HOVER = (29, 78, 216)
+SUCCESS = (22, 163, 74)
+DANGER = (220, 38, 38)
+WARNING = (202, 138, 4)
+MUTED = (71, 85, 105)
+TEXT = (15, 23, 42)
+SELECTION = (219, 234, 254)
 
-# ===== PALETA COOKIE CLICKER =====
-# Colores cálidos inspirados en Cookie Clicker original
-GOLDEN = (255, 215, 0)              # Oro brillante para elementos destacados
-COOKIE_BROWN = (139, 69, 19)        # Marrón galleta principal
-DARK_BROWN = (101, 67, 33)          # Marrón oscuro para sombras
-LIGHT_BROWN = (160, 82, 45)         # Marrón claro para highlights
-CREAM = (245, 245, 220)             # Crema para texto
-WARM_CREAM = (255, 248, 220)        # Crema cálida
-TEXT_CREAM = (255, 253, 208)        # Crema para texto legible
-
-# Colores específicos para paneles
-BACKGROUND_BROWN = (92, 51, 23)     # Fondo principal marrón oscuro
-PANEL_BROWN = (139, 90, 43)         # Paneles laterales
-ACCENT_GOLD = (218, 165, 32)        # Dorado de acento
-
-# ===== CONFIGURACIÓN DE LAYOUT =====
-# Layout de 3 columnas: Galleta | Tienda | Usuario
-GALLETA_WIDTH = 500
-TIENDA_WIDTH = 420  
-USUARIO_WIDTH = 340
+# Alias conservados para los formularios y componentes comunes.
+RED = DANGER
+GREEN = SUCCESS
+BLUE = PRIMARY
+GRAY = MUTED
