@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-
 
 PROTOCOL_VERSION = 1
 AES_KEY_BYTES = 32
@@ -67,7 +67,9 @@ def decode_hex(value: Any, field: str, expected_length: int | None = None) -> by
     return decoded
 
 
-def transport_aad(direction: str, client_id: str, endpoint: str, sequence: int) -> bytes:
+def transport_aad(
+    direction: str, client_id: str, endpoint: str, sequence: int
+) -> bytes:
     """Construye los datos autenticados del protocolo de transporte.
 
     La dirección, el cliente, el endpoint y el contador quedan ligados al
@@ -188,9 +190,7 @@ def encrypt_note(
     if len(title) > MAX_NOTE_TITLE:
         raise ValueError(f"El título no puede superar {MAX_NOTE_TITLE} caracteres")
     if len(content) > MAX_NOTE_CONTENT:
-        raise ValueError(
-            f"El contenido no puede superar {MAX_NOTE_CONTENT} caracteres"
-        )
+        raise ValueError(f"El contenido no puede superar {MAX_NOTE_CONTENT} caracteres")
     if note_id is None:
         note_id = str(uuid.uuid4())
     else:

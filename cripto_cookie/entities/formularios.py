@@ -46,7 +46,11 @@ class CampoTexto:
                 self.text = self.text[:-1]
             elif event.key == pygame.K_ESCAPE:
                 self.active = False
-            elif event.unicode and event.unicode.isprintable() and len(self.text) < self.max_length:
+            elif (
+                event.unicode
+                and event.unicode.isprintable()
+                and len(self.text) < self.max_length
+            ):
                 self.text += event.unicode
         return None
 
@@ -64,9 +68,13 @@ class CampoTexto:
         while shown and self.font.size(shown)[0] > available:
             shown = shown[1:]
         rendered = self.font.render(shown, True, color)
-        surface.blit(rendered, (self.rect.x + 8, self.rect.centery - rendered.get_height() // 2))
+        surface.blit(
+            rendered, (self.rect.x + 8, self.rect.centery - rendered.get_height() // 2)
+        )
         if self.password:
-            label = self.font.render("ver" if not self.password_visible else "oc.", True, settings.PRIMARY)
+            label = self.font.render(
+                "ver" if not self.password_visible else "oc.", True, settings.PRIMARY
+            )
             surface.blit(label, label.get_rect(center=self.eye_rect.center))
 
 
@@ -96,9 +104,17 @@ class _FormularioBase:
         pygame.draw.rect(surface, settings.PANEL, self.rect, border_radius=10)
         pygame.draw.rect(surface, settings.PRIMARY, self.rect, 3, border_radius=10)
         rendered = self.title_font.render(title, True, settings.TEXT)
-        surface.blit(rendered, rendered.get_rect(centerx=self.rect.centerx, y=self.rect.y + 24))
+        surface.blit(
+            rendered, rendered.get_rect(centerx=self.rect.centerx, y=self.rect.y + 24)
+        )
 
-    def _draw_button(self, surface: pygame.Surface, rect: pygame.Rect, text: str, color: tuple[int, int, int]) -> None:
+    def _draw_button(
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        text: str,
+        color: tuple[int, int, int],
+    ) -> None:
         pygame.draw.rect(surface, color, rect, border_radius=5)
         rendered = self.button_font.render(text, True, settings.WHITE)
         surface.blit(rendered, rendered.get_rect(center=rect.center))
@@ -119,10 +135,18 @@ class FormularioRegistro(_FormularioBase):
         x = self.rect.x + 70
         y = self.rect.y + 90
         width = 400
-        self.campo_usuario = CampoTexto(x, y, width, 38, "Usuario (3-32 caracteres)", max_length=32)
-        self.campo_email = CampoTexto(x, y + 65, width, 38, "Correo electrónico", max_length=254)
-        self.campo_password = CampoTexto(x, y + 130, width, 38, "Contraseña (mínimo 12)", True, 128)
-        self.campo_confirmar = CampoTexto(x, y + 195, width, 38, "Repetir contraseña", True, 128)
+        self.campo_usuario = CampoTexto(
+            x, y, width, 38, "Usuario (3-32 caracteres)", max_length=32
+        )
+        self.campo_email = CampoTexto(
+            x, y + 65, width, 38, "Correo electrónico", max_length=254
+        )
+        self.campo_password = CampoTexto(
+            x, y + 130, width, 38, "Contraseña (mínimo 12)", True, 128
+        )
+        self.campo_confirmar = CampoTexto(
+            x, y + 195, width, 38, "Repetir contraseña", True, 128
+        )
         self.boton_registrar = pygame.Rect(x, y + 275, 180, 42)
         self.boton_cancelar = pygame.Rect(x + 220, y + 275, 180, 42)
 
@@ -202,7 +226,9 @@ class FormularioLogin(_FormularioBase):
         super().__init__(screen_width, screen_height, 480, 330)
         x = self.rect.x + 55
         y = self.rect.y + 95
-        self.campo_usuario = CampoTexto(x, y, 370, 38, "Usuario o correo", max_length=254)
+        self.campo_usuario = CampoTexto(
+            x, y, 370, 38, "Usuario o correo", max_length=254
+        )
         self.campo_password = CampoTexto(x, y + 70, 370, 38, "Contraseña", True, 128)
         self.boton_login = pygame.Rect(x, y + 140, 165, 42)
         self.boton_cancelar = pygame.Rect(x + 205, y + 140, 165, 42)

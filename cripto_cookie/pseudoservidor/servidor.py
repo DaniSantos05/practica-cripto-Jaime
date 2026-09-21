@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,10 @@ from core.crypto_utils import (
 )
 from pseudoservidor.manejador_datos_servidor import ManejadorDatosServidor
 
-
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 CERT_DIR = PROJECT_DIR / "certificados"
+SESSION_TTL_SECONDS = 30 * 60
+MAX_ACTIVE_SESSIONS = 1_000
 
 
 class ProtocolError(ValueError):
@@ -48,6 +50,7 @@ def create_app(
     """Crea la aplicación; la inyección de dependencias facilita pruebas aisladas."""
 
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
     manager = ManejadorDatosServidor(data_base_path)
     sessions: dict[str, dict[str, Any]] = {}
     app.config["DATA_MANAGER"] = manager
@@ -64,9 +67,7 @@ def create_app(
         sequence = session["server_sequence"]
         aad = transport_aad("server", client_id, endpoint, sequence)
         nonce = os.urandom(GCM_NONCE_BYTES)
-        ciphertext = AESGCM(session["key"]).encrypt(
-            nonce, canonical_json(payload), aad
-        )
+        ciphertext = AESGCM(session["key"]).encrypt(nonce, canonical_json(payload), aad)
         signature = server_private_key.sign(
             envelope_signing_bytes(aad, nonce, ciphertext),
             padding.PSS(
@@ -100,6 +101,9 @@ def create_app(
         if not isinstance(client_id, str) or client_id not in sessions:
             raise ProtocolError("Sesión no válida")
         session = sessions[client_id]
+        if time.monotonic() - session["last_activity"] > SESSION_TTL_SECONDS:
+            del sessions[client_id]
+            raise ProtocolError("Sesión caducada")
         if authenticated and not session.get("usuario"):
             raise ProtocolError("Sesión no autenticada")
 
@@ -123,6 +127,7 @@ def create_app(
         if not isinstance(payload, dict):
             raise ProtocolError("Payload inválido")
         session["client_sequence"] = sequence
+        session["last_activity"] = time.monotonic()
         return client_id, payload
 
     def decode_or_error(authenticated: bool = False):
@@ -158,6 +163,16 @@ def create_app(
     @app.post("/connect")
     def connect():
         try:
+            now = time.monotonic()
+            expired = [
+                session_id
+                for session_id, session in sessions.items()
+                if now - session["last_activity"] > SESSION_TTL_SECONDS
+            ]
+            for session_id in expired:
+                del sessions[session_id]
+            if len(sessions) >= MAX_ACTIVE_SESSIONS:
+                return plain_error("Demasiadas sesiones activas", 503)
             data = request_json()
             client_id = data.get("id_cliente")
             if not isinstance(client_id, str):
@@ -186,6 +201,7 @@ def create_app(
                 "usuario": None,
                 "client_sequence": 0,
                 "server_sequence": 0,
+                "last_activity": now,
             }
             return secure_response(
                 client_id,
@@ -194,7 +210,7 @@ def create_app(
             )
         except (ProtocolError, ValueError, TypeError):
             return plain_error("No se pudo establecer la sesión segura", 400)
-        except Exception:
+        except Exception:  # noqa: BLE001 - frontera de una petición no autenticada
             return plain_error("No se pudo establecer la sesión segura", 400)
 
     @app.post("/register")
@@ -226,14 +242,14 @@ def create_app(
                 {"status": "ok", "usuario": username, "notes": []},
                 201,
             )
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             return secure_response(
                 client_id,
                 request.path,
                 {"status": "error", "message": str(exc)},
                 400,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - evita filtrar fallos internos al cliente
             return secure_response(
                 client_id,
                 request.path,
@@ -269,14 +285,14 @@ def create_app(
                 request.path,
                 {"status": "ok", **result},
             )
-        except ValueError:
+        except (ValueError, TypeError):
             return secure_response(
                 client_id,
                 request.path,
                 {"status": "error", "message": "Credenciales inválidas"},
                 400,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - frontera HTTP con respuesta controlada
             return secure_response(
                 client_id,
                 request.path,
@@ -295,7 +311,7 @@ def create_app(
             return secure_response(
                 client_id, request.path, {"status": "ok", "notes": records}
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - frontera HTTP con respuesta controlada
             return secure_response(
                 client_id,
                 request.path,
@@ -318,22 +334,20 @@ def create_app(
                 400,
             )
         try:
-            stored = manager.guardar_nota(
-                sessions[client_id]["usuario"], record
-            )
+            stored = manager.guardar_nota(sessions[client_id]["usuario"], record)
             return secure_response(
                 client_id,
                 request.path,
                 {"status": "ok", "note": stored},
             )
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             return secure_response(
                 client_id,
                 request.path,
                 {"status": "error", "message": str(exc)},
                 400,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - frontera HTTP con respuesta controlada
             return secure_response(
                 client_id,
                 request.path,
@@ -359,7 +373,7 @@ def create_app(
                 {"status": message, "deleted": deleted},
                 status,
             )
-        except ValueError:
+        except (ValueError, TypeError):
             return secure_response(
                 client_id,
                 request.path,

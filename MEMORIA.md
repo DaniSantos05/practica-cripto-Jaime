@@ -76,9 +76,10 @@ AES-256-GCM.
 
 Los AAD del transporte incluyen versión, dirección, UUID de cliente, endpoint
 y número de secuencia. Cliente y servidor mantienen contadores independientes,
-por lo que un mensaje repetido o enviado a otro endpoint es rechazado. Los
-nonces de GCM son siempre 96 bits obtenidos de `os.urandom`; no existen claves,
-IVs ni nonces constantes.
+por lo que un mensaje repetido o enviado a otro endpoint es rechazado. Las
+sesiones inactivas caducan a los 30 minutos y el servidor limita el número de
+sesiones simultáneas. Los nonces de GCM son siempre 96 bits obtenidos de
+`os.urandom`; no existen claves, IVs ni nonces constantes.
 
 Las claves privadas RSA son de 3072 bits, se guardan en PKCS#8 cifrado y sus
 contraseñas se solicitan por consola o variable de entorno. Los ficheros de
@@ -145,6 +146,10 @@ registro, login, guardado, listado, descifrado y borrado, además de:
 - sustitución de un mensaje entre endpoints;
 - logout sin sobre autenticado;
 - títulos, contenidos e identificadores inválidos.
+
+La suite actual contiene 13 pruebas y finaliza correctamente. Una de ellas
+levanta un servidor HTTP local real y verifica conjuntamente la PKI, el cliente,
+el transporte, la persistencia cifrada, el logout y un nuevo login.
 
 ### Ataques relevantes y mitigaciones
 

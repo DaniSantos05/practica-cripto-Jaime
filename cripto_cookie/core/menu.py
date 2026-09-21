@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import textwrap
-from typing import Any
 
 import pygame
 
@@ -35,7 +34,11 @@ class Boton:
         )
 
     def draw(self, surface: pygame.Surface, text: str | None = None) -> None:
-        color = tuple(min(255, component + 18) for component in self.color) if self.hovered else self.color
+        color = (
+            tuple(min(255, component + 18) for component in self.color)
+            if self.hovered
+            else self.color
+        )
         pygame.draw.rect(surface, color, self.rect, border_radius=6)
         rendered = self.font.render(text or self.text, True, settings.WHITE)
         surface.blit(rendered, rendered.get_rect(center=self.rect.center))
@@ -58,7 +61,9 @@ class EditorMultilinea:
                 self.active = self.rect.collidepoint(event.pos)
             elif self.rect.collidepoint(event.pos) and event.button in {4, 5}:
                 self.scroll = max(0, self.scroll + (-3 if event.button == 4 else 3))
-        if event.type == pygame.MOUSEWHEEL and self.rect.collidepoint(pygame.mouse.get_pos()):
+        if event.type == pygame.MOUSEWHEEL and self.rect.collidepoint(
+            pygame.mouse.get_pos()
+        ):
             self.scroll = max(0, self.scroll - event.y * 3)
         if event.type == pygame.KEYDOWN and self.active:
             if event.key == pygame.K_BACKSPACE:
@@ -73,7 +78,11 @@ class EditorMultilinea:
                     self.text += "    "
             elif event.key == pygame.K_ESCAPE:
                 self.active = False
-            elif event.unicode and event.unicode.isprintable() and len(self.text) < MAX_NOTE_CONTENT:
+            elif (
+                event.unicode
+                and event.unicode.isprintable()
+                and len(self.text) < MAX_NOTE_CONTENT
+            ):
                 self.text += event.unicode
         return None
 
@@ -106,7 +115,9 @@ class EditorMultilinea:
                 (self.rect.x + 9, self.rect.y + 8 + index * self.line_height),
             )
         if not self.text:
-            rendered = self.font.render("Escribe aquí el contenido de la nota...", True, settings.MUTED)
+            rendered = self.font.render(
+                "Escribe aquí el contenido de la nota...", True, settings.MUTED
+            )
             surface.blit(rendered, (self.rect.x + 9, self.rect.y + 8))
         surface.set_clip(previous_clip)
 
@@ -135,13 +146,27 @@ class Menu:
         self.normal_font = pygame.font.Font(None, 23)
         self.small_font = pygame.font.Font(None, 19)
 
-        self.boton_registro = Boton(pygame.Rect(width // 2 - 210, 420, 190, 48), "Crear cuenta", settings.SUCCESS)
-        self.boton_login = Boton(pygame.Rect(width // 2 + 20, 420, 190, 48), "Iniciar sesión")
-        self.boton_nueva = Boton(pygame.Rect(28, 92, 140, 40), "Nueva nota", settings.SUCCESS)
+        self.boton_registro = Boton(
+            pygame.Rect(width // 2 - 210, 420, 190, 48),
+            "Crear cuenta",
+            settings.SUCCESS,
+        )
+        self.boton_login = Boton(
+            pygame.Rect(width // 2 + 20, 420, 190, 48), "Iniciar sesión"
+        )
+        self.boton_nueva = Boton(
+            pygame.Rect(28, 92, 140, 40), "Nueva nota", settings.SUCCESS
+        )
         self.boton_refrescar = Boton(pygame.Rect(178, 92, 115, 40), "Actualizar")
-        self.boton_guardar = Boton(pygame.Rect(width - 430, height - 68, 130, 40), "Guardar", settings.SUCCESS)
-        self.boton_eliminar = Boton(pygame.Rect(width - 288, height - 68, 130, 40), "Eliminar", settings.DANGER)
-        self.boton_logout = Boton(pygame.Rect(width - 146, 22, 118, 38), "Salir", settings.DANGER)
+        self.boton_guardar = Boton(
+            pygame.Rect(width - 430, height - 68, 130, 40), "Guardar", settings.SUCCESS
+        )
+        self.boton_eliminar = Boton(
+            pygame.Rect(width - 288, height - 68, 130, 40), "Eliminar", settings.DANGER
+        )
+        self.boton_logout = Boton(
+            pygame.Rect(width - 146, 22, 118, 38), "Salir", settings.DANGER
+        )
 
         self.lista_rect = pygame.Rect(28, 145, 300, height - 175)
         self.editor_rect = pygame.Rect(354, 92, width - 382, height - 120)
@@ -265,12 +290,20 @@ class Menu:
                 return "eliminar_nota", note_id
             self.pending_delete_id = self.nota_seleccionada_id
             self.delete_frames = 180
-            self.show_message("Pulsa Eliminar otra vez para confirmar", settings.WARNING)
+            self.show_message(
+                "Pulsa Eliminar otra vez para confirmar", settings.WARNING
+            )
             return None
 
-        if event.type == pygame.MOUSEWHEEL and self.lista_rect.collidepoint(pygame.mouse.get_pos()):
+        if event.type == pygame.MOUSEWHEEL and self.lista_rect.collidepoint(
+            pygame.mouse.get_pos()
+        ):
             self.list_scroll -= event.y
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and self.lista_rect.collidepoint(event.pos):
+        if (
+            event.type == pygame.MOUSEBUTTONDOWN
+            and event.button == 1
+            and self.lista_rect.collidepoint(event.pos)
+        ):
             index = (event.pos[1] - self.lista_rect.y) // 64
             visible = self._visible_notes()
             if 0 <= index < len(visible):
@@ -304,7 +337,9 @@ class Menu:
         pygame.draw.rect(surface, settings.PRIMARY, card, 3, border_radius=14)
         title = self.title_font.render("CryptoNotes", True, settings.TEXT)
         surface.blit(title, title.get_rect(centerx=card.centerx, y=175))
-        subtitle = self.subtitle_font.render("Notas de texto cifradas de extremo a extremo", True, settings.MUTED)
+        subtitle = self.subtitle_font.render(
+            "Notas cifradas en el cliente y durante el transporte", True, settings.MUTED
+        )
         surface.blit(subtitle, subtitle.get_rect(centerx=card.centerx, y=235))
         descriptions = (
             "AES-256-GCM para confidencialidad e integridad",
@@ -324,7 +359,9 @@ class Menu:
         pygame.draw.line(surface, settings.BORDER, (0, 75), (self.width, 75), 1)
         title = self.title_font.render("CryptoNotes", True, settings.TEXT)
         surface.blit(title, (28, 20))
-        user = self.normal_font.render(f"Bóveda de {self.nombre_usuario}", True, settings.MUTED)
+        user = self.normal_font.render(
+            f"Bóveda de {self.nombre_usuario}", True, settings.MUTED
+        )
         surface.blit(user, (225, 31))
         self.boton_logout.draw(surface)
         self.boton_nueva.draw(surface)
@@ -340,22 +377,32 @@ class Menu:
                 self.lista_rect.width - 8,
                 56,
             )
-            color = settings.SELECTION if note["id"] == self.nota_seleccionada_id else settings.PANEL_ALT
+            color = (
+                settings.SELECTION
+                if note["id"] == self.nota_seleccionada_id
+                else settings.PANEL_ALT
+            )
             pygame.draw.rect(surface, color, item, border_radius=5)
             title_text = note["title"][:31]
             title_rendered = self.normal_font.render(title_text, True, settings.TEXT)
             surface.blit(title_rendered, (item.x + 10, item.y + 8))
-            date_rendered = self.small_font.render(note.get("updated_at", "")[:16].replace("T", " "), True, settings.MUTED)
+            date_rendered = self.small_font.render(
+                note.get("updated_at", "")[:16].replace("T", " "), True, settings.MUTED
+            )
             surface.blit(date_rendered, (item.x + 10, item.y + 33))
         if not self.notas:
-            empty = self.normal_font.render("Todavía no hay notas", True, settings.MUTED)
+            empty = self.normal_font.render(
+                "Todavía no hay notas", True, settings.MUTED
+            )
             surface.blit(empty, empty.get_rect(center=self.lista_rect.center))
 
         pygame.draw.rect(surface, settings.PANEL, self.editor_rect, border_radius=8)
         pygame.draw.rect(surface, settings.BORDER, self.editor_rect, 1, border_radius=8)
         heading = "Editar nota" if self.nota_seleccionada_id else "Nueva nota"
         rendered_heading = self.subtitle_font.render(heading, True, settings.TEXT)
-        surface.blit(rendered_heading, (self.editor_rect.x + 24, self.editor_rect.y + 22))
+        surface.blit(
+            rendered_heading, (self.editor_rect.x + 24, self.editor_rect.y + 22)
+        )
         self.campo_titulo.draw(surface)
         self.editor_contenido.draw(surface)
         counter = self.small_font.render(
@@ -363,7 +410,10 @@ class Menu:
             True,
             settings.MUTED,
         )
-        surface.blit(counter, (self.editor_contenido.rect.x, self.editor_contenido.rect.bottom + 8))
+        surface.blit(
+            counter,
+            (self.editor_contenido.rect.x, self.editor_contenido.rect.bottom + 8),
+        )
         self.boton_guardar.draw(surface)
         delete_label = "Confirmar" if self.pending_delete_id else "Eliminar"
         self.boton_eliminar.draw(surface, delete_label)

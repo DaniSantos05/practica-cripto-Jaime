@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from werkzeug.serving import make_server
 
+from core import manejador_datos as client_module
 from core.crypto_utils import (
     GCM_NONCE_BYTES,
     SecurityError,
@@ -26,6 +29,8 @@ from core.crypto_utils import (
     transport_aad,
     unwrap_vault_key,
 )
+from core.manejador_datos import ManejadorDatos
+from generar_pki import generate_pki
 from pseudoservidor.servidor import create_app
 
 
@@ -195,12 +200,8 @@ class CryptoNotesSecurityTests(unittest.TestCase):
         self.register()
         title = "Plan privado"
         content = "Este texto nunca debe aparecer en usuarios.json"
-        encrypted = encrypt_note(
-            self.vault_key, self.username, title, content
-        )
-        response, payload, _ = self.secure.post(
-            "/notes/save", {"note": encrypted}
-        )
+        encrypted = encrypt_note(self.vault_key, self.username, title, content)
+        response, payload, _ = self.secure.post("/notes/save", {"note": encrypted})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "ok")
 
@@ -274,9 +275,7 @@ class CryptoNotesSecurityTests(unittest.TestCase):
             self.secure.decrypt_response(body, "/notes/list")
 
     def test_note_tampering_and_wrong_vault_password_are_rejected(self) -> None:
-        record = encrypt_note(
-            self.vault_key, self.username, "Título", "Contenido"
-        )
+        record = encrypt_note(self.vault_key, self.username, "Título", "Contenido")
         record["ciphertext"] = self.flip_hex_byte(record["ciphertext"], 0)
         with self.assertRaises(SecurityError):
             decrypt_note(self.vault_key, self.username, record)
@@ -307,6 +306,89 @@ class CryptoNotesSecurityTests(unittest.TestCase):
             encrypt_note(self.vault_key, self.username, "x" * 121, "contenido")
         with self.assertRaises(ValueError):
             encrypt_note(self.vault_key, self.username, "título", "x" * 10_001)
+
+
+class FullClientIntegrationTest(unittest.TestCase):
+    """Comprueba cliente HTTP, PKI, transporte, bóveda y persistencia juntos."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary_directory = tempfile.TemporaryDirectory()
+        cls.base_path = Path(cls.temporary_directory.name)
+        cls.cert_dir = cls.base_path / "certificados"
+        cls.server_password = b"servidor-pruebas-2026"
+        generate_pki(
+            cert_dir=cls.cert_dir,
+            passwords=(
+                b"raiz-pruebas-segura",
+                b"intermedia-pruebas-segura",
+                cls.server_password,
+            ),
+        )
+        private_key = serialization.load_pem_private_key(
+            (cls.cert_dir / "server.key").read_bytes(),
+            password=cls.server_password,
+        )
+        if not isinstance(private_key, rsa.RSAPrivateKey):
+            raise TypeError("La PKI no generó una clave RSA")
+        app = create_app(
+            cls.base_path / "servidor",
+            private_key,
+            (cls.cert_dir / "server.crt").read_bytes(),
+            (cls.cert_dir / "sub_ca.crt").read_bytes(),
+        )
+        app.config.update(TESTING=True)
+        cls.http_server = make_server("127.0.0.1", 0, app)
+        cls.server_thread = threading.Thread(
+            target=cls.http_server.serve_forever, daemon=True
+        )
+        cls.server_thread.start()
+        cls.old_root_path = client_module.ROOT_CERT_PATH
+        client_module.ROOT_CERT_PATH = cls.cert_dir / "root_ca.crt"
+        cls.server_url = f"http://127.0.0.1:{cls.http_server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.http_server.shutdown()
+        cls.server_thread.join(timeout=3)
+        client_module.ROOT_CERT_PATH = cls.old_root_path
+        cls.temporary_directory.cleanup()
+
+    def test_real_client_end_to_end(self) -> None:
+        username = f"integration_{uuid.uuid4().hex[:8]}"
+        password = "frase integración suficientemente robusta"
+        client = ManejadorDatos(self.server_url)
+        registered = client.registrar_usuario(
+            {
+                "usuario": username,
+                "email": f"{username}@example.test",
+                "password": password,
+            }
+        )
+        self.assertIsNotNone(registered, client.last_error)
+        notes = client.guardar_nota(
+            "Nota de integración", "Contenido cifrado durante reposo y transporte"
+        )
+        self.assertIsNotNone(notes, client.last_error)
+        self.assertEqual(notes[0]["title"], "Nota de integración")
+        self.assertTrue(client.logout(), client.last_error)
+
+        second_client = ManejadorDatos(self.server_url)
+        logged_in = second_client.validar_login(
+            {"usuario": username, "password": password}
+        )
+        self.assertIsNotNone(logged_in, second_client.last_error)
+        self.assertEqual(
+            logged_in["notes"][0]["content"],
+            "Contenido cifrado durante reposo y transporte",
+        )
+        self.assertTrue(second_client.logout(), second_client.last_error)
+
+        users_text = (
+            cls_path := self.base_path / "servidor" / "datos" / "usuarios.json"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(cls_path.exists())
+        self.assertNotIn("Contenido cifrado durante reposo y transporte", users_text)
 
 
 if __name__ == "__main__":

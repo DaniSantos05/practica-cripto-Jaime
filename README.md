@@ -17,6 +17,7 @@ recibe el título ni el contenido de las notas en claro.
 - Clave pública del servidor autenticada mediante una PKI raíz/intermedia.
 - Datos autenticados adicionales que ligan mensajes y notas a su contexto.
 - Contadores por dirección para rechazar mensajes repetidos o desordenados.
+- Caducidad de sesiones inactivas a los 30 minutos y límite de sesiones activas.
 - Claves privadas PKI cifradas y archivos de datos con permisos restrictivos.
 
 La PKI es una ampliación: el enunciado actual no la exige, pero permite
@@ -94,6 +95,9 @@ La suite cubre, entre otros casos:
 - contraseña incorrecta para abrir la bóveda;
 - repetición de mensajes y sustitución entre endpoints;
 - logout sin autenticación y límites de entrada.
+
+La ejecución de referencia supera 13 pruebas, incluida una integración real
+cliente HTTP + PKI + servidor + persistencia.
 
 ## Organización
 

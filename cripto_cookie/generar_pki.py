@@ -14,7 +14,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-
 BASE_DIR = Path(__file__).resolve().parent
 CERT_DIR = BASE_DIR / "certificados"
 
@@ -58,15 +57,26 @@ def _write_certificate(path: Path, certificate: x509.Certificate) -> None:
     os.chmod(path, 0o644)
 
 
-def generate_pki(force: bool = False) -> None:
-    CERT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+def generate_pki(
+    force: bool = False,
+    cert_dir: Path | None = None,
+    passwords: tuple[bytes, bytes, bytes] | None = None,
+) -> None:
+    """Genera la jerarquía en ``cert_dir``.
+
+    ``passwords`` existe para pruebas automatizadas; la ejecución normal nunca
+    recibe contraseñas desde el código y utiliza consola o variables de entorno.
+    """
+
+    target_dir = cert_dir or CERT_DIR
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths = {
-        "root_key": CERT_DIR / "root_ca.key",
-        "root_cert": CERT_DIR / "root_ca.crt",
-        "sub_key": CERT_DIR / "sub_ca.key",
-        "sub_cert": CERT_DIR / "sub_ca.crt",
-        "server_key": CERT_DIR / "server.key",
-        "server_cert": CERT_DIR / "server.crt",
+        "root_key": target_dir / "root_ca.key",
+        "root_cert": target_dir / "root_ca.crt",
+        "sub_key": target_dir / "sub_ca.key",
+        "sub_cert": target_dir / "sub_ca.crt",
+        "server_key": target_dir / "server.key",
+        "server_cert": target_dir / "server.crt",
     }
     existing = [path for path in paths.values() if path.exists()]
     if len(existing) == len(paths) and not force:
@@ -77,13 +87,16 @@ def generate_pki(force: bool = False) -> None:
             "La PKI está incompleta. Revísala o ejecuta con --force para regenerarla."
         )
 
-    root_password = _password("CRYPTONOTES_ROOT_CA_PASSWORD", "la CA raíz")
-    intermediate_password = _password(
-        "CRYPTONOTES_SUB_CA_PASSWORD", "la CA intermedia"
-    )
-    server_password = _password(
-        "CRYPTONOTES_SERVER_KEY_PASSWORD", "el servidor"
-    )
+    if passwords is None:
+        root_password = _password("CRYPTONOTES_ROOT_CA_PASSWORD", "la CA raíz")
+        intermediate_password = _password(
+            "CRYPTONOTES_SUB_CA_PASSWORD", "la CA intermedia"
+        )
+        server_password = _password("CRYPTONOTES_SERVER_KEY_PASSWORD", "el servidor")
+    else:
+        root_password, intermediate_password, server_password = passwords
+        if any(len(password) < 12 for password in passwords):
+            raise ValueError("Las contraseñas de prueba deben tener 12 bytes o más")
 
     now = datetime.now(timezone.utc)
     root_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
@@ -210,7 +223,7 @@ def generate_pki(force: bool = False) -> None:
     _write_certificate(paths["sub_cert"], intermediate_cert)
     _write_private_key(paths["server_key"], server_key, server_password)
     _write_certificate(paths["server_cert"], server_cert)
-    print(f"PKI generada en {CERT_DIR}")
+    print(f"PKI generada en {target_dir}")
     print("Las claves privadas están cifradas y no deben añadirse al repositorio.")
 
 

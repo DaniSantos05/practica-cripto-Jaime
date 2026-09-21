@@ -25,11 +25,18 @@ mkdir -p logs
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
+SERVER_READY=0
 for _ in {1..30}; do
     if .venv/bin/python -c "import requests; requests.get('http://127.0.0.1:5000', timeout=1).raise_for_status()" 2>/dev/null; then
+        SERVER_READY=1
         break
     fi
     sleep 0.2
 done
+
+if [ "$SERVER_READY" -ne 1 ]; then
+    echo "El servidor no pudo iniciarse. Revisa logs/servidor.log."
+    exit 1
+fi
 
 .venv/bin/python main.py

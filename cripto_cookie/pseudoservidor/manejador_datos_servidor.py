@@ -25,7 +25,6 @@ from core.crypto_utils import (
     utc_now_iso,
 )
 
-
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{3,32}$")
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 MAX_NOTES_PER_USER = 200
@@ -66,7 +65,7 @@ class ManejadorDatosServidor:
             except (FileNotFoundError, json.JSONDecodeError) as exc:
                 raise RuntimeError(f"No se pudo leer {path.name}") from exc
             if not isinstance(data, expected_type):
-                raise RuntimeError(f"Formato inválido en {path.name}")
+                raise TypeError(f"Formato inválido en {path.name}")
             return data
 
     def _guardar_json(self, path: Path, data: Any) -> None:
@@ -143,7 +142,7 @@ class ManejadorDatosServidor:
         if not isinstance(password, str) or not 12 <= len(password) <= 128:
             raise ValueError("La contraseña debe tener entre 12 y 128 caracteres")
         if not isinstance(vault, dict):
-            raise ValueError("Falta la bóveda cifrada")
+            raise TypeError("Falta la bóveda cifrada")
         ManejadorDatosServidor._validar_vault(vault)
         return username, email.lower(), password, vault
 
@@ -204,7 +203,7 @@ class ManejadorDatosServidor:
         identifier = data.get("usuario")
         password = data.get("password")
         if not isinstance(identifier, str) or not isinstance(password, str):
-            raise ValueError("Credenciales inválidas")
+            raise TypeError("Credenciales inválidas")
         if len(identifier) > 254 or len(password) > 128:
             raise ValueError("Credenciales inválidas")
 
@@ -252,7 +251,7 @@ class ManejadorDatosServidor:
     def _validar_nota_cifrada(record: dict[str, Any]) -> tuple[str, str, str]:
         note_id = record.get("id")
         if not isinstance(note_id, str):
-            raise ValueError("Identificador de nota inválido")
+            raise TypeError("Identificador de nota inválido")
         try:
             uuid.UUID(note_id)
         except ValueError as exc:
@@ -267,11 +266,13 @@ class ManejadorDatosServidor:
         with self._lock:
             users = self._cargar_json(self.archivo_usuarios, dict)
             user = users.get(username)
-            if not isinstance(user, dict):
+            if user is None:
                 raise ValueError("Usuario inexistente")
+            if not isinstance(user, dict):
+                raise TypeError("Registro de usuario inválido")
             notes = user.get("notes", {})
             if not isinstance(notes, dict):
-                raise RuntimeError("Almacén de notas inválido")
+                raise TypeError("Almacén de notas inválido")
             return sorted(
                 (dict(record) for record in notes.values()),
                 key=lambda item: str(item.get("updated_at", "")),
@@ -283,11 +284,13 @@ class ManejadorDatosServidor:
         with self._lock:
             users = self._cargar_json(self.archivo_usuarios, dict)
             user = users.get(username)
-            if not isinstance(user, dict):
+            if user is None:
                 raise ValueError("Usuario inexistente")
+            if not isinstance(user, dict):
+                raise TypeError("Registro de usuario inválido")
             notes = user.setdefault("notes", {})
             if not isinstance(notes, dict):
-                raise RuntimeError("Almacén de notas inválido")
+                raise TypeError("Almacén de notas inválido")
             if note_id not in notes and len(notes) >= MAX_NOTES_PER_USER:
                 raise ValueError("Se ha alcanzado el máximo de notas")
             now = utc_now_iso()
@@ -310,8 +313,10 @@ class ManejadorDatosServidor:
         with self._lock:
             users = self._cargar_json(self.archivo_usuarios, dict)
             user = users.get(username)
-            if not isinstance(user, dict):
+            if user is None:
                 raise ValueError("Usuario inexistente")
+            if not isinstance(user, dict):
+                raise TypeError("Registro de usuario inválido")
             notes = user.get("notes", {})
             if not isinstance(notes, dict) or note_id not in notes:
                 return False

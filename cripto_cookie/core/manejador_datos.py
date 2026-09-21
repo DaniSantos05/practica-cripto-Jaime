@@ -6,13 +6,14 @@ import ipaddress
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, cast
+from typing import Any
 
 import requests
 from cryptography import x509
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
@@ -31,7 +32,6 @@ from core.crypto_utils import (
     transport_aad,
     unwrap_vault_key,
 )
-
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 ROOT_CERT_PATH = PROJECT_DIR / "certificados" / "root_ca.crt"
@@ -68,7 +68,11 @@ class ManejadorDatos:
     @staticmethod
     def _check_certificate_dates(certificate: x509.Certificate) -> None:
         now = datetime.now(timezone.utc)
-        if not certificate.not_valid_before_utc <= now <= certificate.not_valid_after_utc:
+        if (
+            not certificate.not_valid_before_utc
+            <= now
+            <= certificate.not_valid_after_utc
+        ):
             raise SecurityError("Hay un certificado caducado o todavía no válido")
 
     def _obtain_and_verify_certificates(self) -> None:
@@ -105,15 +109,26 @@ class ManejadorDatos:
         server_constraints = server.extensions.get_extension_for_class(
             x509.BasicConstraints
         ).value
-        if not root_constraints.ca or not intermediate_constraints.ca or server_constraints.ca:
+        if (
+            not root_constraints.ca
+            or not intermediate_constraints.ca
+            or server_constraints.ca
+        ):
             raise SecurityError("Restricciones de la cadena PKI inválidas")
         usages = server.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
         if ExtendedKeyUsageOID.SERVER_AUTH not in usages:
-            raise SecurityError("El certificado no es válido para autenticar servidores")
-        san = server.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            raise SecurityError(
+                "El certificado no es válido para autenticar servidores"
+            )
+        san = server.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName
+        ).value
         dns_names = san.get_values_for_type(x509.DNSName)
         ip_addresses = san.get_values_for_type(x509.IPAddress)
-        if "localhost" not in dns_names or ipaddress.ip_address("127.0.0.1") not in ip_addresses:
+        if (
+            "localhost" not in dns_names
+            or ipaddress.ip_address("127.0.0.1") not in ip_addresses
+        ):
             raise SecurityError("El certificado no identifica al servidor local")
 
         public_key = server.public_key()
@@ -149,7 +164,10 @@ class ManejadorDatos:
         )
         response.raise_for_status()
         confirmation = self._decrypt_response(response.json(), "/connect")
-        if confirmation.get("status") != "ok" or confirmation.get("challenge") != challenge.hex():
+        if (
+            confirmation.get("status") != "ok"
+            or confirmation.get("challenge") != challenge.hex()
+        ):
             raise SecurityError("El servidor no confirmó el desafío del handshake")
 
     def _ensure_connection(self) -> bool:
@@ -159,18 +177,18 @@ class ManejadorDatos:
             self._establish_secure_connection()
             self.last_error = ""
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - frontera de red/PKI para la interfaz
             self._clear_transport()
             self.last_error = f"No se pudo establecer la conexión segura: {exc}"
             return False
 
-    def _encrypt_request(self, endpoint: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _encrypt_request(
+        self, endpoint: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
         if self.session_key is None:
             raise SecurityError("No existe una clave de sesión")
         self.client_sequence += 1
-        aad = transport_aad(
-            "client", self.client_id, endpoint, self.client_sequence
-        )
+        aad = transport_aad("client", self.client_id, endpoint, self.client_sequence)
         nonce = os.urandom(GCM_NONCE_BYTES)
         ciphertext = AESGCM(self.session_key).encrypt(
             nonce, canonical_json(payload), aad
@@ -209,7 +227,7 @@ class ManejadorDatos:
         try:
             plaintext = AESGCM(self.session_key).decrypt(nonce, ciphertext, aad)
             payload = json.loads(plaintext.decode("utf-8"))
-        except Exception as exc:
+        except (InvalidTag, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SecurityError("Respuesta cifrada inválida") from exc
         if not isinstance(payload, dict):
             raise SecurityError("Payload de respuesta inválido")
@@ -242,7 +260,13 @@ class ManejadorDatos:
             self._clear_transport()
             self._clear_identity()
             return None, response.status_code
-        except Exception as exc:
+        except (
+            requests.RequestException,
+            SecurityError,
+            ValueError,
+            TypeError,
+            KeyError,
+        ) as exc:
             self.last_error = f"Fallo de seguridad o conexión: {exc}"
             self._clear_transport()
             self._clear_identity()
@@ -253,7 +277,9 @@ class ManejadorDatos:
             raise SecurityError("La bóveda no está abierta")
         if not isinstance(records, list):
             raise SecurityError("Lista de notas inválida")
-        notes = [decrypt_note(self.vault_key, self.username, record) for record in records]
+        notes = [
+            decrypt_note(self.vault_key, self.username, record) for record in records
+        ]
         notes.sort(key=lambda note: note.get("updated_at", ""), reverse=True)
         return notes
 
@@ -275,9 +301,10 @@ class ManejadorDatos:
             self.username = username
             self.vault_key = vault_key
             return {"usuario": username, "notes": []}
-        except Exception as exc:
+        except (SecurityError, ValueError, TypeError, KeyError) as exc:
             self.last_error = f"No se pudo crear la bóveda: {exc}"
             self._clear_identity()
+            self._clear_transport()
             return None
 
     def validar_login(self, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -299,9 +326,10 @@ class ManejadorDatos:
             notes = self._decrypt_note_records(response.get("notes"))
             self.last_error = ""
             return {"usuario": username, "notes": notes}
-        except Exception as exc:
+        except (SecurityError, ValueError, TypeError, KeyError) as exc:
             self.last_error = f"No se pudo abrir la bóveda: {exc}"
             self._clear_identity()
+            self._clear_transport()
             return None
 
     def listar_notas(self) -> list[dict[str, str]] | None:
@@ -350,7 +378,9 @@ class ManejadorDatos:
             self._clear_transport()
             return True
         response, status = self._secure_post("/logout", {})
-        success = response is not None and status == 200 and response.get("status") == "ok"
+        success = (
+            response is not None and status == 200 and response.get("status") == "ok"
+        )
         self._clear_identity()
         self._clear_transport()
         return success
